@@ -1,0 +1,38 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/ 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b1-058df67
+model      : /home/pipo/slm-fleet/Qwen3-0.6B-Q8_0.gguf
+ftype      : Q8_0
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+
+> Write a short function that parses "2h30m" style duration strings into seconds, returning null on invalid input.
+
+[Start thinking]
+
+Okay, I need to write a function that takes a duration string in the format "2h30m" and converts it into seconds, returning null if it's invalid. Let's think about how to approach this.
+
+First, the input is a string like "2h30m". The output should be the total seconds. So, the steps I need to do are:
+
+[ Prompt: 121.3 t/s | Generation: 25.0 t/s ]
+
+
+Exiting...

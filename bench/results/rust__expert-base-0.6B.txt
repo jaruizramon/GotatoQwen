@@ -1,0 +1,38 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/ 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b1-058df67
+model      : /home/pipo/slm-fleet/Qwen3-0.6B-Q8_0.gguf
+ftype      : Q8_0
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+
+> Implement a `retry` helper in Rust that calls a closure returning Result, retrying with exponential backoff up to N attempts, using std only.
+
+[Start thinking]
+
+Okay, I need to implement a retry helper in Rust that calls a closure returning a Result, with exponential backoff up to N attempts. Let me think about how to approach this.
+
+First, I remember that exponential backoff is a common pattern used in retries. So, the idea is to keep trying the function until either it succeeds or we've tried N times. Each time, the
+
+[ Prompt: 114.6 t/s | Generation: 25.4 t/s ]
+
+
+Exiting...

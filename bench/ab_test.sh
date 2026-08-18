@@ -4,17 +4,23 @@
 # usage: bash ab_test.sh [--quick]
 set -uo pipefail
 cd "$(dirname "$0")"
-M=models
-B=llama.cpp/build/bin
+M=${GOTATO_FLEET:-models}   # honor the env contract; default: local models/
+B=${GOTATO_LLAMA_BIN:-llama.cpp/build/bin}
 OUT=results
 mkdir -p "$OUT"
 
+RAM_GB=$(free -g | awk '/Mem:/{print $2}')
 MODELS=(
-  "$M/qwen3.8-27b-q4km.gguf:27B-original"
   "$M/Qwen3.5-4B-Q4_K_M.gguf:fleet-4B"
   "$M/Qwen3.5-2B-Q4_K_M.gguf:fleet-2B"
   "$M/Qwen3-0.6B-Q8_0.gguf:expert-base-0.6B"
 )
+if [ "$RAM_GB" -ge 24 ] && [ -f "$M/qwen3.8-27b-q4km.gguf" ]; then
+  MODELS=("$M/qwen3.8-27b-q4km.gguf:27B-original" "${MODELS[@]}")
+  echo "  [ab_test] RAM=${RAM_GB}GB: including 27B-original"
+else
+  echo "  [ab_test] RAM=${RAM_GB}GB (<24): skipping 27B (potato mode)"
+fi
 GEN=${GEN:-80}
 SCORE="$OUT/scoreboard.tsv"
 echo -e "task\tmodel\ts\tok_s\tgen_tok_s" > "$SCORE"

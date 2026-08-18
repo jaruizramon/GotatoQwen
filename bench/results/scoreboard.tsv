@@ -1,0 +1,16 @@
+task	model	s	ok_s	gen_tok_s
+generic	fleet-4B	23.132658934	3.4	5.2
+generic	fleet-2B	11.295920390	7.0	11.1
+generic	expert-base-0.6B	5.177198020	15.4	25.0
+javascript	fleet-4B	23.287219009	3.4	5.1
+javascript	fleet-2B	11.358621766	7.0	10.9
+javascript	expert-base-0.6B	5.291402952	15.1	24.3
+python	fleet-4B	23.657062112	3.3	5.2
+python	fleet-2B	11.723303228	6.8	10.8
+python	expert-base-0.6B	5.273066781	15.1	25.1
+rust	fleet-4B	23.598813336	3.3	5.0
+rust	fleet-2B	11.436918065	6.9	11.2
+rust	expert-base-0.6B	5.199691653	15.3	25.4
+typescript	fleet-4B	23.435401168	3.4	5.2
+typescript	fleet-2B	11.666620109	6.8	11.0
+typescript	expert-base-0.6B	5.273621102	15.1	25.2

@@ -318,22 +318,21 @@ func route(target string, gen int, session string, scopeCheckOn bool) int {
 	}
 	lang, conf := detectLanguage(text, path)
 
-	// tier-2 outranks tier-1: if the sub-index resolves this input to a
-	// section with a strong margin, semantics beat lexical detection.
+	// tier-2 outranks tier-1 ALWAYS (when the index exists): semantics beat
+	// lexical detection on strong margins. --scope-check additionally gates
+	// the session-owner escalation protocol.
 	var idxPath string = fleetDir + "/subindex.json"
 	var semanticLang string = ""
 	var semanticMargin float64 = 0
-	if scopeCheckOn {
-		if hits := resolveIndex(idxPath, text, 2); len(hits) > 0 {
-			top := hits[0]
-			if len(hits) > 1 && hits[1].Score > 0 {
-				semanticMargin = top.Score / hits[1].Score
-			} else {
-				semanticMargin = 2.0
-			}
-			if semanticMargin >= 2.0 {
-				semanticLang = top.Lang
-			}
+	if hits := resolveIndex(idxPath, text, 2); len(hits) > 0 {
+		top := hits[0]
+		if len(hits) > 1 && hits[1].Score > 0 {
+			semanticMargin = top.Score / hits[1].Score
+		} else {
+			semanticMargin = 2.0
+		}
+		if semanticMargin >= 2.0 {
+			semanticLang = top.Lang
 		}
 	}
 
@@ -342,7 +341,7 @@ func route(target string, gen int, session string, scopeCheckOn bool) int {
 	if prev, ok := lastSessionTurn(session); ok {
 		ownerLang = prev.Lang
 	}
-	if semanticLang != "" && ownerLang != "" && semanticLang != ownerLang {
+	if scopeCheckOn && semanticLang != "" && ownerLang != "" && semanticLang != ownerLang {
 		// ask before switching - the out-of-scope protocol
 		var scopeEv string = "out-of-scope->" + semanticLang
 		var escalation string = fmt.Sprintf(

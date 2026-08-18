@@ -1,0 +1,38 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/ 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b1-058df67
+model      : /home/pipo/slm-fleet/Qwen3-0.6B-Q8_0.gguf
+ftype      : Q8_0
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+
+> Implement a function `chunked(seq, n)` that yields successive n-sized chunks from a sequence, with docstring and type hints, Python 3.10+ style.
+
+[Start thinking]
+
+Okay, I need to implement a function called chunked that takes a sequence and an integer n and returns successive n-sized chunks. Let me think about how to approach this.
+
+First, the function should have a docstring. The docstring should explain what it does. Then, the function needs to return chunks. So, for example, if the input is a list like [1,
+
+[ Prompt: 113.9 t/s | Generation: 25.1 t/s ]
+
+
+Exiting...

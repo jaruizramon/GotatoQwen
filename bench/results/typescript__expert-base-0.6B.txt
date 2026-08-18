@@ -1,0 +1,37 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/ 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b1-058df67
+model      : /home/pipo/slm-fleet/Qwen3-0.6B-Q8_0.gguf
+ftype      : Q8_0
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+
+> Implement a typed function `debounce<T extends (...args: any[]) => void>(fn: T, ms: number)` returning a debounced version, with proper TypeScript generics.
+
+[Start thinking]
+
+Okay, I need to implement a debounce function in TypeScript. Let me think about how to approach this. The user wants a function that takes a function and a timeout, and returns a debounced version. The generics are T extends (...args: any[]) => void, so the original function can take any number of arguments, but the returned function must be a wrapper that delays its execution.
+
+
+[ Prompt: 116.7 t/s | Generation: 25.2 t/s ]
+
+
+Exiting...

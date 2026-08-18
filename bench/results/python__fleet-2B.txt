@@ -1,0 +1,41 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\ 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b1-058df67
+model      : /home/pipo/slm-fleet/Qwen3.5-2B-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+
+> Implement a function `chunked(seq, n)` that yields successive n-sized chunks from a sequence, with docstring and type hints, Python 3.10+ style.
+
+[Start thinking]
+
+The user wants me to implement a function `chunked(seq, n)` that:
+1. Takes a sequence and a chunk size `n`
+2. Yields successive n-sized chunks from the sequence
+3. Should have a docstring
+4. Should have type hints
+5. Should be Python 3.10+ style (meaning it should use `yield` for generator
+
+[ Prompt: 37.7 t/s | Generation: 10.8 t/s ]
+
+
+Exiting...

@@ -1,0 +1,42 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\ 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b1-058df67
+model      : /home/pipo/slm-fleet/Qwen3.5-2B-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+
+> Implement a typed function `debounce<T extends (...args: any[]) => void>(fn: T, ms: number)` returning a debounced version, with proper TypeScript generics.
+
+[Start thinking]
+
+The user wants me to implement a debounced function in TypeScript. This is a common pattern where you want to delay the execution of a function until a certain time has passed since the last call.
+
+Key requirements:
+1. Type-safe generic function
+2. Takes a function `fn` as parameter
+3. Takes a timeout `ms` as parameter
+4. Returns a debounced version
+
+[ Prompt: 36.9 t/s | Generation: 11.0 t/s ]
+
+
+Exiting...
