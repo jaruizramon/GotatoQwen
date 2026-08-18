@@ -120,14 +120,33 @@ func resetPosition(session string, n int) {
 	posMu.Unlock()
 }
 
-// summarizeVia: ask the generalist SLM to compress the history.
+// summarizeVia: ask the summarizer slice to compress the history; fall
+// back to the 2B generalist while the dedicated slice is still training.
+// The summarizer slice (0.6B + LoRA, ~20-26 tok/s) is 2-4x faster than the
+// 2B, which matters because compaction now runs at the effective window.
 func summarizeVia(cfg *serveConfig, history string) string {
 	prompt := "Summarize this conversation so a fresh model can continue without " +
 		"losing anything. Keep all concrete requirements, code decisions, and the " +
 		"user's goal. Output only the summary:\n\n" + history
 	body, _ := json.Marshal(map[string]any{"prompt": prompt, "n_predict": 250,
 		"temperature": 0.2})
-	resp, err := httpPostJSON(cfg.backends["general"]+"/completion", body)
+	// ensure the dedicated summarizer slice is running (autostart reads
+	// index.json; a missing/not-ready entry just leaves the fallback in play)
+	cfg.mu.Lock()
+	_, haveSummarizer := cfg.backends["summarizer"]
+	cfg.mu.Unlock()
+	if !haveSummarizer {
+		if url := autostartLang(cfg, "summarizer"); url != "" {
+			fmt.Fprintf(os.Stderr, "[chain] summarizer slice autostarted at %s\n", url)
+		}
+	}
+	cfg.mu.Lock()
+	target := cfg.backends["summarizer"]
+	if target == "" {
+		target = cfg.backends["general"]
+	}
+	cfg.mu.Unlock()
+	resp, err := httpPostJSON(target+"/completion", body)
 	if err != nil {
 		return ""
 	}

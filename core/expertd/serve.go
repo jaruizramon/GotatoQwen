@@ -645,6 +645,17 @@ func mustJSON(v any) string {
 // memstatsHandler: GET /memstats - runtime heap + goroutine state, so
 // memory leaks in the gateway are observable (the OMP status line polls
 // /slms; a growing HeapAlloc at constant load means a leak).
+// chatChainCap: the compaction trigger for chat sessions. 3600 (~88% of the
+// backend's 4096 window) once the dedicated summarizer slice is ready;
+// 12000 while the 2B fallback would make every compaction a 1-2min stall.
+func chatChainCap() int {
+	idx := loadIndex()
+	if e, ok := idx["summarizer"]; ok && e.Status == "ready" {
+		return 3600
+	}
+	return 12000
+}
+
 func memstatsHandler(cfg *serveConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/memstats" {
@@ -784,10 +795,11 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		if nPredict <= 0 {
 			nPredict = 256
 		}
-		// potato cap: a 0.6B-4B SLM rambles past 512 tokens; every extra
-		// hundred tokens is ~10s of wall time at these speeds.
-		if nPredict > 512 {
-			nPredict = 512
+		// potato cap: 0.6B-4B SLMs ramble; 640 gives the baked-in think block
+		// room to close (~250-400 tokens) with ~250 left for the answer.
+		// Every extra hundred tokens is ~5-10s of wall time at these speeds.
+		if nPredict > 640 {
+			nPredict = 640
 		}
 		// potato budget: the fleet backends run -c 4096, and omp ships a
 		// ~14k-token system prompt. Truncate from the FRONT (the tail holds
@@ -804,7 +816,7 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 			// chat sessions: the window is bounded by truncation anyway, so
 			// chaining is only worth its 2B summarizer cost for LONG histories
 			// (~12K positions = dozens of potato turns). Per-request override.
-			ChainCap: 12000}
+			ChainCap: chatChainCap()}
 		plan := routeCompletion(cfg, &req)
 		if plan.override != "" {
 			// escalation / delegation text arrives as a normal assistant reply
@@ -1007,10 +1019,11 @@ func streamRelayChat(w http.ResponseWriter, resp *http.Response, req *completion
 		}
 	}
 	// empty-stop guard: if the ENTIRE reply was thinking (unclosed <think>
-	// burned the whole budget), surface it as content so omp never sees an
-	// empty stop - empty stops trigger its retry loop, doubling the cost.
+	// burned the whole budget), the reasoning was already streamed to the
+	// client's Thinking block; end with a continuation hint instead of an
+	// empty stop (which triggers omp's retry loop) or a ramble dump.
 	if !emittedContent && reasoningText.Len() > 0 {
-		var fallback string = strings.TrimSpace(reasoningText.String())
+		var fallback string = "\n[the model spent its whole budget thinking - say 'continue' to get the answer]"
 		content.WriteString(fallback)
 		emitContentDelta(fallback)
 	}
