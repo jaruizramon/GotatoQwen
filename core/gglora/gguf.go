@@ -18,6 +18,7 @@ import (
 const (
 	ggmlF32 uint32 = 0
 	ggmlF16 uint32 = 1
+	ggmlQ8_0 uint32 = 8
 )
 
 type tensorInfo struct {
@@ -32,6 +33,45 @@ type ggufFile struct {
 	data  []byte // mmap of the whole file
 	infos []tensorInfo
 	align uint64 // data section absolute offset
+	kv    map[string]any // metadata key-values (strings/numbers/arrays)
+}
+
+// kvString / kvInt / kvFloat / kvArray: typed metadata accessors.
+func (g *ggufFile) kvString(key string) string {
+	if v, ok := g.kv[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func (g *ggufFile) kvInt(key string) int {
+	if v, ok := g.kv[key].(int); ok {
+		return v
+	}
+	if v, ok := g.kv[key].(int64); ok {
+		return int(v)
+	}
+	return 0
+}
+
+func (g *ggufFile) kvFloat(key string) float64 {
+	if v, ok := g.kv[key].(float64); ok {
+		return v
+	}
+	if v, ok := g.kv[key].(int); ok {
+		return float64(v)
+	}
+	if v, ok := g.kv[key].(int64); ok {
+		return float64(v)
+	}
+	return 0
+}
+
+func (g *ggufFile) kvArray(key string) []any {
+	if v, ok := g.kv[key].([]any); ok {
+		return v
+	}
+	return nil
 }
 
 func (g *ggufFile) u32(off uint64) uint32 {
@@ -88,7 +128,7 @@ func loadGGUF(path string) (*ggufFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	g := &ggufFile{data: data}
+	g := &ggufFile{data: data, kv: map[string]any{}}
 	var off uint64 = 0
 	var magic uint32 = g.u32(off)
 	off += 4
@@ -102,10 +142,13 @@ func loadGGUF(path string) (*ggufFile, error) {
 	off += 8
 	var kv uint64 = 0
 	for kv = 0; kv < nkv; kv++ {
-		_, off = g.str(off)
+		var key string
+		key, off = g.str(off)
 		var vtype uint32 = g.u32(off)
 		off += 4
-		off = g.skipValue(off, vtype)
+		var v any
+		v, off = g.readValue(off, vtype)
+		g.kv[key] = v
 	}
 	// tensor infos
 	g.infos = make([]tensorInfo, 0, ntensors)
@@ -132,6 +175,51 @@ func loadGGUF(path string) (*ggufFile, error) {
 	return g, nil
 }
 
+// readValue: parse one KV value (returns the decoded Go value and the next
+// offset). Arrays decode to []any.
+func (g *ggufFile) readValue(off uint64, vtype uint32) (any, uint64) {
+	switch vtype {
+	case 0:
+		return int(g.data[off]), off + 1
+	case 1:
+		return int(int8(g.data[off])), off + 1
+	case 2:
+		return int(binary.LittleEndian.Uint16(g.data[off : off+2])), off + 2
+	case 3:
+		return int(int16(binary.LittleEndian.Uint16(g.data[off : off+2]))), off + 2
+	case 4:
+		return int(binary.LittleEndian.Uint32(g.data[off : off+4])), off + 4
+	case 5:
+		return int(int32(binary.LittleEndian.Uint32(g.data[off : off+4]))), off + 4
+	case 6:
+		return float64(math.Float32frombits(binary.LittleEndian.Uint32(g.data[off : off+4]))), off + 4
+	case 7:
+		return g.data[off] != 0, off + 1
+	case 8:
+		var n uint64 = g.u64(off)
+		return string(g.data[off+8 : off+8+n]), off + 8 + n
+	case 10:
+		return int64(binary.LittleEndian.Uint64(g.data[off : off+8])), off + 8
+	case 11:
+		return int64(int64(binary.LittleEndian.Uint64(g.data[off : off+8]))), off + 8
+	case 12:
+		return math.Float64frombits(binary.LittleEndian.Uint64(g.data[off : off+8])), off + 8
+	case 9: // array
+		var elem uint32 = g.u32(off)
+		var count uint64 = g.u64(off + 4)
+		var p uint64 = off + 12
+		var arr []any = make([]any, 0, count)
+		var idx uint64 = 0
+		for idx = 0; idx < count; idx++ {
+			var v any
+			v, p = g.readValue(p, elem)
+			arr = append(arr, v)
+		}
+		return arr, p
+	}
+	return nil, off + 4
+}
+
 // f16ToF32: IEEE 754 half -> float32 (5-bit exponent, bias 15).
 // NOT the bf16 left-shift: that trick only works for bf16's 8-bit layout.
 func f16ToF32(h uint16) float32 {
@@ -146,6 +234,16 @@ func f16ToF32(h uint16) float32 {
 	}
 	var e32 uint32 = exp - 15 + 127 // rebias
 	return math.Float32frombits((sign << 31) | (e32 << 23) | (man << 13))
+}
+
+// unmap: release the model-file mmap. The dequantized weights live in RAM;
+// the file mapping is only needed while reading tensors. A long-lived
+// trainer must not pin the whole file.
+func (g *ggufFile) unmap() {
+	if g.data != nil {
+		_ = syscall.Munmap(g.data)
+		g.data = nil
+	}
 }
 
 func (g *ggufFile) tensorF32(info *tensorInfo) []float32 {
@@ -169,6 +267,35 @@ func (g *ggufFile) tensorF32(info *tensorInfo) []float32 {
 			out[idx] = f16ToF32(h)
 		}
 		return out
+	}
+	if info.Type == ggmlQ8_0 {
+		// Q8_0 block: f16 scale d (2 bytes), then 32 int8 values.
+		// x[i] = q[i] * d. (llama.cpp: block = {ggml_half d; int8 qs[32]},
+		// 34 bytes per block - NOT 36.)
+		var block uint64 = 0
+		for block = 0; block < nelem/32; block++ {
+			var d float32 = f16ToF32(binary.LittleEndian.Uint16(g.data[base+block*34 : base+block*34+2]))
+			var qbase uint64 = base + block*34 + 2
+			var i uint32 = 0
+			for i = 0; i < 32; i++ {
+				out[block*32+uint64(i)] = float32(int8(g.data[qbase+uint64(i)])) * d
+			}
+		}
+		if nelem%32 != 0 {
+			return nil // ragged Q8_0 is not expected for weight tensors
+		}
+		return out
+	}
+	return nil
+}
+
+// findTensor: locate a tensor by exact name.
+func (g *ggufFile) findTensor(name string) *tensorInfo {
+	var i int = 0
+	for i = 0; i < len(g.infos); i++ {
+		if g.infos[i].Name == name {
+			return &g.infos[i]
+		}
 	}
 	return nil
 }

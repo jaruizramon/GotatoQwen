@@ -19,6 +19,7 @@
 package main
 
 import (
+	"runtime"
 	"bufio"
 	"encoding/json"
 	"fmt"
@@ -110,7 +111,7 @@ func hasBackend(cfg *serveConfig, lang string) bool {
 	if !ok {
 		return false
 	}
-	resp, err := http.Get(port + "/health")
+	resp, err := httpClient.Get(port + "/health")
 	if err != nil {
 		return false
 	}
@@ -138,7 +139,7 @@ func autostartLang(cfg *serveConfig, lang string) string {
 	var port int = 8084
 	for {
 		url := fmt.Sprintf("http://127.0.0.1:%d", port)
-		if resp, err := http.Get(url + "/health"); err != nil || resp.StatusCode != 200 {
+		if resp, err := httpClient.Get(url + "/health"); err != nil || resp.StatusCode != 200 {
 			break
 		}
 		port++
@@ -157,7 +158,7 @@ func autostartLang(cfg *serveConfig, lang string) string {
 	}
 	url := fmt.Sprintf("http://127.0.0.1:%d", port)
 	for i := 0; i < 60; i++ {
-		resp, err := http.Get(url + "/health")
+		resp, err := httpClient.Get(url + "/health")
 		if err == nil {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -432,7 +433,7 @@ func serveHandler(cfg *serveConfig) http.HandlerFunc {
 		cfg.setActive(slmBaseName(plan.target, plan.servedLang), plan.servedLang)
 		defer cfg.clearActive()
 		t0 := time.Now()
-		resp, err := http.Post(plan.target+"/completion", "application/json", strings.NewReader(plan.fwdBody))
+		resp, err := httpClient.Post(plan.target+"/completion", "application/json", strings.NewReader(plan.fwdBody))
 		if err != nil {
 			http.Error(w, `{"error":"backend unreachable: `+plan.target+`"}`, 502)
 			return
@@ -521,38 +522,13 @@ func serveCmd(args []string) {
 	mux.HandleFunc("/slms", slmsHandler(cfg))
 	mux.HandleFunc("/v1/chat/completions", chatHandler(cfg))
 	mux.HandleFunc("/v1/models", modelsHandler(cfg))
+	mux.HandleFunc("/memstats", memstatsHandler(cfg))
+	warmState() // one cold ledger read; the hot state is RAM-only afterwards
 	fmt.Printf("[gateway] listening on %s | backends: %v\n", cfg.addr, cfg.backends)
 	if err := http.ListenAndServe(cfg.addr, mux); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-}
-
-// ledgerUsesByTarget: how many turns each backend served, from the session
-// ledger. Keys are backend URLs ("http://127.0.0.1:8081"). Both the
-// "backend(...)" and "autostart(...)" turn shapes contribute.
-func ledgerUsesByTarget() map[string]int {
-	uses := map[string]int{}
-	f, err := os.Open(sessionsPath)
-	if err != nil {
-		return uses
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
-	for sc.Scan() {
-		var t turn
-		if json.Unmarshal(sc.Bytes(), &t) != nil {
-			continue
-		}
-		for _, prefix := range []string{"backend(", "autostart("} {
-			if strings.HasPrefix(t.SLM, prefix) && strings.HasSuffix(t.SLM, ")") {
-				url := strings.TrimSuffix(strings.TrimPrefix(t.SLM, prefix), ")")
-				uses[url]++
-			}
-		}
-	}
-	return uses
 }
 
 func backendPort(url string) string {
@@ -664,6 +640,29 @@ func slmsHandler(cfg *serveConfig) http.HandlerFunc {
 func mustJSON(v any) string {
 	out, _ := json.Marshal(v)
 	return string(out)
+}
+
+// memstatsHandler: GET /memstats - runtime heap + goroutine state, so
+// memory leaks in the gateway are observable (the OMP status line polls
+// /slms; a growing HeapAlloc at constant load means a leak).
+func memstatsHandler(cfg *serveConfig) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/memstats" {
+			http.NotFound(w, r)
+			return
+		}
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		stateMu.Lock()
+		nsessions := len(lastTurns)
+		nuses := len(useCounts)
+		stateMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte(fmt.Sprintf(
+			`{"heap_alloc":%d,"heap_objects":%d,"num_gc":%d,"goroutines":%d,"sessions_in_ram":%d,"use_count_keys":%d}`,
+			ms.HeapAlloc, ms.HeapObjects, ms.NumGC, runtime.NumGoroutine(), nsessions, nuses)))
+	}
 }
 
 // stripThink: remove <think>...</think> blocks from SLM output. Qwen3's
@@ -795,7 +794,7 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		// the recent turns + the assistant opener the SLM must continue);
 		// the router still scopes on the full last user message.
 		prompt := strings.TrimSpace(sb.String())
-		const maxPromptChars = 3600 * 4 // ~3600 tokens at the len/4 estimate
+		const maxPromptChars = 3400 * 4 // ~3400 tokens: safety margin under the -c 4096 window
 		if len(prompt) > maxPromptChars {
 			prompt = "[gateway: earlier context truncated to fit the 4k window]\n" +
 				prompt[len(prompt)-maxPromptChars:]
@@ -812,7 +811,7 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		cfg.setActive(slmBaseName(plan.target, plan.servedLang), plan.servedLang)
 		defer cfg.clearActive()
 		t0 := time.Now()
-		resp, err := http.Post(plan.target+"/completion", "application/json", strings.NewReader(plan.fwdBody))
+		resp, err := httpClient.Post(plan.target+"/completion", "application/json", strings.NewReader(plan.fwdBody))
 		if err != nil {
 			http.Error(w, `{"error":{"message":"backend unreachable: `+plan.target+`"}}`, 502)
 			return
@@ -901,7 +900,9 @@ func streamRelayChat(w http.ResponseWriter, resp *http.Response, req *completion
 	var promptTokens int = 0
 	inThink := false // <think> spans chunks; drop everything until </think>
 	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	sbuf := getScanBuf()
+	defer putScanBuf(sbuf)
+	sc.Buffer(sbuf, 1<<20)
 	for sc.Scan() {
 		line := sc.Text()
 		if !strings.HasPrefix(line, "data:") {
@@ -1082,7 +1083,9 @@ func streamRelay(w http.ResponseWriter, resp *http.Response, req *completionReq,
 	var tokens int = 0
 	var promptTokens int = 0
 	sc := bufio.NewScanner(strings.NewReader(acc.String()))
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	sbuf := getScanBuf()
+	defer putScanBuf(sbuf)
+	sc.Buffer(sbuf, 1<<20)
 	for sc.Scan() {
 		line := sc.Text()
 		if !strings.HasPrefix(line, "data:") {

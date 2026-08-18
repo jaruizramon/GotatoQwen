@@ -16,8 +16,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,7 +65,9 @@ func readContent(session string, lastN int) []chainTurn {
 	defer f.Close()
 	var all []chainTurn
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	buf := getScanBuf()
+	defer putScanBuf(buf)
+	sc.Buffer(buf, 1<<20)
 	for sc.Scan() {
 		var t chainTurn
 		if json.Unmarshal([]byte(sc.Text()), &t) == nil {
@@ -148,7 +148,7 @@ func chainContext(cfg *serveConfig, session string, newPrompt string, cap int) (
 			session, pos, estTokens(newPrompt), cap)
 		return "", false
 	}
-	turns := readContent(session, 0)
+	turns := readContent(session, 300) // the old tail is summarized; never re-read the whole archive
 	if len(turns) < 4 {
 		fmt.Fprintf(os.Stderr, "[chain] %s: pos %d > cap %d but only %d turns\n",
 			session, pos, cap, len(turns))
@@ -182,19 +182,6 @@ func chainContext(cfg *serveConfig, session string, newPrompt string, cap int) (
 	return prefix, true
 }
 
-func httpPostJSON(url string, body []byte) ([]byte, error) {
-	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
-}
 
 // jsonString: JSON-encode a string (used when rebuilding forwarded bodies).
 func jsonString(s string) string {

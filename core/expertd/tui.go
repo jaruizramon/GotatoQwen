@@ -461,7 +461,7 @@ func chatRun(gateway string, session string, prompt string, abort chan bool) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		pushBlock(bTool, "error", "gateway unreachable: "+err.Error())
 		finishTurn()

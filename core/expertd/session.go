@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -38,6 +39,15 @@ type turn struct {
 
 var sessionsPath string = fleetDir + "/sessions.jsonl" // overridden in applyEnv()
 
+// ---- in-memory hot state ------------------------------------------------
+// lastTurns: per-session latest turn (the router reads it on EVERY request;
+// the ledger file grows forever, so it must never be re-read per request).
+// useCounts: per-backend-URL turn counts for the /slms roster (polled
+// every 500ms by the OMP status line).
+var stateMu sync.Mutex
+var lastTurns map[string]turn = map[string]turn{}
+var useCounts map[string]int = map[string]int{}
+
 func appendTurn(t turn) {
 	data, err := json.Marshal(t)
 	if err != nil {
@@ -49,6 +59,57 @@ func appendTurn(t turn) {
 	}
 	_, _ = f.Write(append(data, '\n'))
 	_ = f.Close()
+	// hot state
+	stateMu.Lock()
+	lastTurns[t.Session] = t
+	for _, prefix := range []string{"backend(", "autostart("} {
+		if strings.HasPrefix(t.SLM, prefix) && strings.HasSuffix(t.SLM, ")") {
+			useCounts[strings.TrimSuffix(strings.TrimPrefix(t.SLM, prefix), ")")]++
+		}
+	}
+	stateMu.Unlock()
+}
+
+// warmState: one cold read of the ledger at startup so the in-memory
+// counters/last-turns survive restarts. After this, appendTurn keeps them
+// hot and the file is never re-read per request.
+func warmState() {
+	f, err := os.Open(sessionsPath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	buf := getScanBuf()
+	defer putScanBuf(buf)
+	sc := bufio.NewScanner(f)
+	sc.Buffer(buf, 1<<20)
+	stateMu.Lock()
+	for sc.Scan() {
+		var t turn
+		if json.Unmarshal(sc.Bytes(), &t) != nil {
+			continue
+		}
+		if t.Session != "" {
+			lastTurns[t.Session] = t
+		}
+		for _, prefix := range []string{"backend(", "autostart("} {
+			if strings.HasPrefix(t.SLM, prefix) && strings.HasSuffix(t.SLM, ")") {
+				useCounts[strings.TrimSuffix(strings.TrimPrefix(t.SLM, prefix), ")")]++
+			}
+		}
+	}
+	stateMu.Unlock()
+}
+
+// ledgerUsesByTarget: per-backend-URL turn counts for the roster.
+func ledgerUsesByTarget() map[string]int {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	out := make(map[string]int, len(useCounts))
+	for k, v := range useCounts {
+		out[k] = v
+	}
+	return out
 }
 
 // sessionsCmd: show the last N turns grouped by session, with the active SLM.
@@ -68,7 +129,9 @@ func sessionsCmd(args []string) {
 	defer f.Close()
 	var lines []string
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	buf := getScanBuf()
+	defer putScanBuf(buf)
+	sc.Buffer(buf, 1<<20)
 	for sc.Scan() {
 		lines = append(lines, sc.Text())
 	}
@@ -118,22 +181,38 @@ func sortStrings(s []string) {
 }
 
 // lastSessionTurn: the most recent turn for a session (its "owner" SLM/lang).
+// lastSessionTurn: the latest turn of a session, from RAM. Falls back to a
+// tail scan of the ledger for sessions seen before this process started
+// (the fallback result is cached in RAM).
 func lastSessionTurn(session string) (turn, bool) {
+	stateMu.Lock()
+	if t, ok := lastTurns[session]; ok {
+		stateMu.Unlock()
+		return t, true
+	}
+	stateMu.Unlock()
 	f, err := os.Open(sessionsPath)
 	if err != nil {
 		return turn{}, false
 	}
 	defer f.Close()
+	buf := getScanBuf()
+	defer putScanBuf(buf)
 	var last turn
 	var found bool = false
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	sc.Buffer(buf, 1<<20)
 	for sc.Scan() {
 		var t turn
 		if json.Unmarshal([]byte(sc.Text()), &t) == nil && t.Session == session {
 			last = t
 			found = true
 		}
+	}
+	if found {
+		stateMu.Lock()
+		lastTurns[session] = last
+		stateMu.Unlock()
 	}
 	return last, found
 }

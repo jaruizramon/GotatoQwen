@@ -1,7 +1,8 @@
-// main.go - proof of concept: one real-weight LoRA step in Go, then dump
-// A/B/dA/dB so the torch side can verify parity.
+// main.go - gglora: the Go LoRA toolkit.
 //
-// usage: gglora <model.gguf> <tensor-name> <m> <outfile.json>
+//   gglora <model.gguf> <tensor> <m> <out.json>   PoC: one verified LoRA step
+//   gglora train ...                               full-model LoRA trainer
+//   gglora tokcheck ...                            tokenizer verification
 package main
 
 import (
@@ -11,8 +12,18 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "train" {
+		trainCmd(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "tokcheck" {
+		tokcheckCmd(os.Args[2:])
+		return
+	}
 	if len(os.Args) < 5 {
 		fmt.Println("usage: gglora <model.gguf> <tensor> <m> <out.json>")
+		fmt.Println("       gglora train --base <model.gguf> --corpus <text> --out <adapter.gguf> [--ctx 256] [--stride 128] [--epochs 2] [--threads 4]")
+		fmt.Println("       gglora tokcheck --base <model.gguf> --text <s> [--verify --server :8082]")
 		os.Exit(2)
 	}
 	var path string = os.Args[1]
