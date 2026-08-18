@@ -150,6 +150,17 @@ index.json) on :8084+, adopts the session owner, and the next task hits it.
 Sessions ledger: `expertd sessions`. Backends config: serve.go
 defaultServeConfig() - the python expert is :8081, 2B :8082, 4B :8083.
 
+### Context chaining (automatic)
+
+The gateway chains contexts when a session approaches its cap (default 3072
+tokens, per-request override `"chain_cap": N`): it summarizes the archived
+history with the 2B SLM, seeds a fresh context with [summary + recent turns],
+and continues - nothing is lost (the full archive lives in
+`$GOTATO_FLEET/sessions/<id>.jsonl`, storage is cheap). Chained responses
+carry `X-Gotato-Chain: true` and a visible `[context chained...]` prefix;
+the ledger records `context-chain` events. This is orchestration-level, not
+a llama.cpp C patch - upstream's native answer is a lossy KV-cache shift.
+
 ## 8. Test harness
 
 ```bash
