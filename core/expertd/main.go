@@ -543,6 +543,8 @@ func main() {
 		sessionsCmd(os.Args[2:])
 	case "serve":
 		serveCmd(os.Args[2:])
+	case "chat":
+		chatCmd(os.Args[2:])
 	case "bench":
 		bench(os.Args[2], 20)
 	case "index":

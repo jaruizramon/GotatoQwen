@@ -161,6 +161,16 @@ carry `X-Gotato-Chain: true` and a visible `[context chained...]` prefix;
 the ledger records `context-chain` events. This is orchestration-level, not
 a llama.cpp C patch - upstream's native answer is a lossy KV-cache shift.
 
+### The TUI harness (`expertd chat`)
+
+Interactive chat with live SLM visibility: while the backend streams, the
+status line shows `Thinking [python-expert · utils] 3.2s` with the SLM tag in
+reverse video; the answer prints under a footer with the tag + tok/s; the
+terminal bell rings when the delegated SLM switches. Topic suffixes come from
+the gateway's `X-Gotato-SLM` header (base · topic, e.g. `python-expert ·
+utils`, `rust-slice · rust`). Requires the gateway + at least one backend
+running. Streaming is SSE passthrough (`"stream": true`).
+
 ## 8. Test harness
 
 ```bash
