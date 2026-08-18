@@ -171,6 +171,19 @@ the gateway's `X-Gotato-SLM` header (base · topic, e.g. `python-expert ·
 utils`, `rust-slice · rust`). Requires the gateway + at least one backend
 running. Streaming is SSE passthrough (`"stream": true`).
 
+### The language bridge (`--bridge zh`)
+
+English in → Chinese for the SLM → English back out. Determinism contract:
+(1) fixed layer (templates/messages) is table-driven; (2) free-form uses
+greedy (the gateway FORCES temperature:0 on every forward - without it
+llama-server's default sampling makes output random) plus a disk translation
+cache (`$GOTATO_FLEET/translations/zh/<hash>.txt`), so identical input is
+byte-identical output (verified); (3) code blocks (``` fences) are never
+translated. The translator is an INSTRUCT model (lm-kit/Qwen3-1.7B-Instruct
+Q4_K_M on :8086) via /v1/chat/completions with a hard system directive - base
+models narrate instead of translating. Warm slots break determinism:
+cache_prompt is always false (the chain feature rebuilds prefixes instead).
+
 ## 8. Test harness
 
 ```bash
