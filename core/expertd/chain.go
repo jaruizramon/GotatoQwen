@@ -193,12 +193,30 @@ func chainContext(cfg *serveConfig, session string, newPrompt string, cap int) (
 		t := turns[i]
 		tail.WriteString(t.Role + ": " + t.Content + "\n")
 	}
-	prefix := "CONTEXT SUMMARY (prior conversation):\n" + summary + "\n\n" +
-		"RECENT EXCHANGE:\n" + tail.String()
-	resetPosition(session, estTokens(prefix))
+	// the summary becomes a compressed segment: full text in RAM (reserved
+	// 1GB cap) + .gz on disk, a 200-char preview as the live pointer.
+	meta := saveSegment(session, summary)
+	var prefix strings.Builder
+	fmt.Fprintf(&prefix, "CONTEXT SUMMARY seg-%d (current):\n%s\n\n", meta.ID, summary)
+	// older segments appear as compact pointers; retrieval rehydrates them
+	// on demand when the prompt matches a preview.
+	segs := loadManifest(session).Segments
+	if len(segs) > 1 {
+		prefix.WriteString("PAST SEGMENTS:\n")
+		for _, s := range segs {
+			if s.ID == meta.ID {
+				continue
+			}
+			fmt.Fprintf(&prefix, "  seg-%d: %s\n", s.ID, s.Preview)
+		}
+		prefix.WriteString("\n")
+	}
+	prefix.WriteString("RECENT EXCHANGE:\n" + tail.String())
+	resetPosition(session, estTokens(prefix.String()))
 	// archive the chain event so the ledger and future reads see it
-	appendContent(session, "system", "CONTEXT CHAINED at pos "+fmt.Sprint(pos)+": "+summary)
-	return prefix, true
+	appendContent(session, "system", "CONTEXT CHAINED at pos "+fmt.Sprint(pos)+
+		" into seg-"+fmt.Sprint(meta.ID)+": "+summary)
+	return prefix.String(), true
 }
 
 

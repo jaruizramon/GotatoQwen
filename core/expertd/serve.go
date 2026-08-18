@@ -523,6 +523,7 @@ func serveCmd(args []string) {
 	mux.HandleFunc("/v1/chat/completions", chatHandler(cfg))
 	mux.HandleFunc("/v1/models", modelsHandler(cfg))
 	mux.HandleFunc("/memstats", memstatsHandler(cfg))
+	segCacheInit() // the reserved summary-RAM cap (GOTATO_SUMMARY_CACHE_MB)
 	warmState() // one cold ledger read; the hot state is RAM-only afterwards
 	fmt.Printf("[gateway] listening on %s | backends: %v\n", cfg.addr, cfg.backends)
 	if err := http.ListenAndServe(cfg.addr, mux); err != nil {
@@ -810,6 +811,15 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		if len(prompt) > maxPromptChars {
 			prompt = "[gateway: earlier context truncated to fit the 4k window]\n" +
 				prompt[len(prompt)-maxPromptChars:]
+		}
+		// summary-store retrieval: if the current request matches a past
+		// segment's preview, rehydrate its full summary (RAM or gz) so a
+		// "what did we decide about X" lands on the right past point.
+		for _, seg := range retrieveSegments(session, lastUser, 2) {
+			full := loadSegment(session, seg)
+			if full != "" {
+				prompt = fmt.Sprintf("[PAST SEGMENT seg-%d: %s]\n%s\n\n", seg.ID, seg.Preview, full) + prompt
+			}
 		}
 		req := completionReq{Prompt: prompt, NPredict: nPredict,
 			Session: session, RoutePrompt: lastUser, Stream: creq.Stream, SkipBridge: true,
