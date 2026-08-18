@@ -43,9 +43,11 @@ if [ "$NO_SERVERS" = "0" ]; then
       -t 4 -c 4096 --port 8082 > $OUT/server-2b.log 2>&1 &
   nohup $B/llama-server -m $F/Qwen3.5-4B-Q4_K_M.gguf \
       -t 4 -c 4096 --port 8083 > $OUT/server-4b.log 2>&1 &
+  sleep 3  # let the binds settle before polling
   for port in 8081 8082 8083; do
-    for i in $(seq 1 60); do
-      curl -s -o /dev/null "http://localhost:$port/health" && break
+    for i in $(seq 1 90); do
+      h=$(curl -s "http://localhost:$port/health")
+      echo "$h" | grep -q '"ok"' && break
       sleep 2
     done
     echo "  :$port $(curl -s http://localhost:$port/health)"
