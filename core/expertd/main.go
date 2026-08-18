@@ -20,6 +20,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -186,6 +187,19 @@ func detectLanguage(text string, path string) (string, float64) {
 	return best, float64(bestN) / float64(total)
 }
 
+func resolveIndex(idxPath string, text string, topN int) []hit {
+	idx, err := loadSubIndex(idxPath)
+	if err != nil {
+		return nil
+	}
+	return idx.resolve(text, topN)
+}
+
+// usedPlaceholder: no model was invoked yet (escalation turns).
+func usedPlaceholder() string {
+	return "none"
+}
+
 // ---- index --------------------------------------------------------------
 func loadIndex() indexFile {
 	var idx indexFile = make(indexFile)
@@ -270,7 +284,7 @@ func watch(stack string, interval time.Duration, once bool) {
 }
 
 // ---- route --------------------------------------------------------------
-func route(target string, gen int) int {
+func route(target string, gen int, session string, scopeCheckOn bool) int {
 	var text string = ""
 	var path string = ""
 	if st, err := os.Stat(target); err == nil && !st.IsDir() {
@@ -284,13 +298,59 @@ func route(target string, gen int) int {
 	}
 	lang, conf := detectLanguage(text, path)
 
+	// tier-2 outranks tier-1: if the sub-index resolves this input to a
+	// section with a strong margin, semantics beat lexical detection.
+	var idxPath string = fleetDir + "/subindex.json"
+	var semanticLang string = ""
+	var semanticMargin float64 = 0
+	if scopeCheckOn {
+		if hits := resolveIndex(idxPath, text, 2); len(hits) > 0 {
+			top := hits[0]
+			if len(hits) > 1 && hits[1].Score > 0 {
+				semanticMargin = top.Score / hits[1].Score
+			} else {
+				semanticMargin = 2.0
+			}
+			if semanticMargin >= 2.0 {
+				semanticLang = top.Lang
+			}
+		}
+	}
+
+	// session ownership: the SLM that served the previous turn owns the session
+	var ownerLang string = ""
+	if prev, ok := lastSessionTurn(session); ok {
+		ownerLang = prev.Lang
+	}
+	if semanticLang != "" && ownerLang != "" && semanticLang != ownerLang {
+		// ask before switching - the out-of-scope protocol
+		var scopeEv string = "out-of-scope->" + semanticLang
+		var escalation string = fmt.Sprintf(
+			"destination hit out of scope - shall we delegate an SLM for %s?",
+			semanticLang)
+		var t turn = turn{Session: session, Ts: time.Now().UnixMilli(),
+			SLM: usedPlaceholder(), Lang: ownerLang, Tokens: 0, WallMs: 0,
+			ScopeEvent: scopeEv, Escalation: escalation}
+		appendTurn(t)
+		fmt.Printf("[router] session owner=%s | semantic hit=%s (margin %.1fx)\n",
+			ownerLang, semanticLang, semanticMargin)
+		fmt.Printf("[router] >>> %s\n", escalation)
+		return 0
+	}
+	if semanticLang != "" {
+		lang = semanticLang
+		conf = semanticMargin
+	}
+
 	idx := loadIndex()
 	entry, ok := idx[lang]
 	var model string = ""
 	var lora string = ""
+	var used string = "generalist"
 	if ok && entry.Status == "ready" && entry.Lora != "" {
 		model = fleetDir + "/" + entry.Base
 		lora = fleetDir + "/" + entry.Lora
+		used = "expert(" + entry.Lora + ")"
 		fmt.Printf("[router] lang=%s conf=%.2f -> expert (%s + %s)\n", lang, conf, entry.Base, entry.Lora)
 	} else {
 		model = fleetDir + "/Qwen3.5-4B-Q4_K_M.gguf"
@@ -307,12 +367,39 @@ func route(target string, gen int) int {
 		args = append(args, "--lora", lora)
 	}
 	t0 := time.Now()
+	var buf bytes.Buffer
 	cmd := exec.Command(llamaCli, args...)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = &buf
 	cmd.Stderr = os.Stderr
 	err := cmd.Run()
 	dt := time.Since(t0)
-	fmt.Printf("\n[router] %d tokens requested, wall %.1fs\n", gen, dt.Seconds())
+
+	// out-of-scope protocol: input-side (deterministic) then output-side (drift)
+	var scopeEv string = ""
+	var escalation string = ""
+	if scopeCheckOn {
+		var idxPath string = fleetDir + "/subindex.json"
+		// the session's owner is the SLM that served the previous turn
+		var ownerLang string = lang
+		if prev, ok := lastSessionTurn(session); ok {
+			ownerLang = prev.Lang
+		}
+		scopeEv, escalation = scopeCheck(idxPath, text, ownerLang)
+		if scopeEv == "" {
+			scopeEv, escalation = scopeCheck(idxPath, stripTiming(buf.String()), lang)
+		}
+	}
+	t := turn{Session: session, Ts: time.Now().UnixMilli(), SLM: used,
+		Lang: lang, Tokens: gen, WallMs: dt.Milliseconds(),
+		ScopeEvent: scopeEv, Escalation: escalation}
+	appendTurn(t)
+
+	out := buf.String()
+	fmt.Print(out)
+	fmt.Printf("\n[router] [%s] %d tokens in %.1fs\n", used, gen, dt.Seconds())
+	if escalation != "" {
+		fmt.Printf("\n[router] >>> %s\n", escalation)
+	}
 	if err != nil {
 		fmt.Printf("[router] llama-cli failed: %v\n", err)
 		return 1
@@ -336,7 +423,7 @@ func bench(stack string, rounds int) {
 func main() {
 	debug.SetGCPercent(-1) // the whole point: no garbage collector
 	if len(os.Args) < 2 {
-		fmt.Println("usage: expertd scan|detect|watch|route|bench ...")
+		fmt.Println("usage: expertd scan|detect|watch|route|bench|index|resolve ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -367,16 +454,40 @@ func main() {
 		watch(stack, 15*time.Second, once)
 	case "route":
 		var gen int = 120
-		if len(os.Args) < 3 {
-			fmt.Println("usage: expertd route <file|text> [-n N]")
+		var session string = "default"
+		var scopeCheckOn bool = false
+		var target string = ""
+		for i := 2; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "-n":
+				if i+1 < len(os.Args) {
+					gen, _ = strconv.Atoi(os.Args[i+1])
+					i++
+				}
+			case "--session":
+				if i+1 < len(os.Args) {
+					session = os.Args[i+1]
+					i++
+				}
+			case "--scope-check":
+				scopeCheckOn = true
+			default:
+				target = os.Args[i]
+			}
+		}
+		if target == "" {
+			fmt.Println("usage: expertd route <file|text> [-n N] [--session ID] [--scope-check]")
 			os.Exit(2)
 		}
-		if len(os.Args) > 4 && os.Args[3] == "-n" {
-			gen, _ = strconv.Atoi(os.Args[4])
-		}
-		os.Exit(route(os.Args[2], gen))
+		os.Exit(route(target, gen, session, scopeCheckOn))
+	case "sessions":
+		sessionsCmd(os.Args[2:])
 	case "bench":
 		bench(os.Args[2], 20)
+	case "index":
+		indexCmd(os.Args[2:])
+	case "resolve":
+		resolveCmd(os.Args[2:])
 	default:
 		io.WriteString(os.Stderr, "unknown command\n")
 		os.Exit(2)

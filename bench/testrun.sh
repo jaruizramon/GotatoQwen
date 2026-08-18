@@ -1,5 +1,5 @@
 #!/bin/bash
-# testrun.sh - test-run the stackslice fleet in llama.cpp.
+# testrun.sh - test-run the GotatoQwen fleet in llama.cpp.
 #
 #   phase 1  status      : models, expert adapter, sub-index, ledger
 #   phase 2  servers     : llama-server per SLM (8081 python-expert, 8082 2B, 8083 4B)
@@ -13,7 +13,7 @@ cd "$(dirname "$0")"
 F=/home/pipo/slm-fleet
 B=/home/pipo/llama.cpp/build/bin
 EXPERD=$F/expertd/expertd
-[ -x "$EXPERD" ] || EXPERD=/home/pipo/stackslice/core/expertd/expertd
+[ -x "$EXPERD" ] || EXPERD=/home/pipo/GotatoQwen/core/expertd/expertd
 TASKS=/home/pipo/laptop/tasks
 OUT=$F/testrun
 mkdir -p "$OUT"
