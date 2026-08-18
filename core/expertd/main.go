@@ -45,6 +45,26 @@ var builderPath string = fleetDir + "/expert-builder.py"
 var venvPython string = "/home/pipo/qwen-venv/bin/python"
 var llamaCli string = "/home/pipo/llama.cpp/build/bin/llama-cli"
 
+// applyEnv: the agent-setup contract. Every machine-specific path can be
+// overridden by environment variables, so a fresh checkout needs no edits:
+//   GOTATO_FLEET     fleet dir (models, adapters, index, sessions, sub-index)
+//   GOTATO_LLAMA_BIN llama.cpp build/bin dir (llama-cli, llama-server, ...)
+//   GOTATO_VENV_PY   the python interpreter of the project venv
+func applyEnv() {
+	if v := os.Getenv("GOTATO_FLEET"); v != "" {
+		fleetDir = v
+		indexPath = fleetDir + "/index.json"
+		builderPath = fleetDir + "/expert-builder.py"
+		sessionsPath = fleetDir + "/sessions.jsonl"
+	}
+	if v := os.Getenv("GOTATO_LLAMA_BIN"); v != "" {
+		llamaCli = v + "/llama-cli"
+	}
+	if v := os.Getenv("GOTATO_VENV_PY"); v != "" {
+		venvPython = v
+	}
+}
+
 // ---- language map: extension -> language --------------------------------
 var extToLang map[string]string = map[string]string{
 	".py": "python", ".pyw": "python", ".pyi": "python",
@@ -422,6 +442,7 @@ func bench(stack string, rounds int) {
 
 func main() {
 	debug.SetGCPercent(-1) // the whole point: no garbage collector
+	applyEnv()
 	if len(os.Args) < 2 {
 		fmt.Println("usage: expertd scan|detect|watch|route|bench|index|resolve ...")
 		os.Exit(2)

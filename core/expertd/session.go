@@ -35,7 +35,7 @@ type turn struct {
 	Margin     float64 `json:"margin,omitempty"`
 }
 
-var sessionsPath string = fleetDir + "/sessions.jsonl"
+var sessionsPath string = fleetDir + "/sessions.jsonl" // overridden in applyEnv()
 
 func appendTurn(t turn) {
 	data, err := json.Marshal(t)

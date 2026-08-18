@@ -17,9 +17,9 @@ Usage:
 """
 import argparse, hashlib, json, os, subprocess, sys, time
 
-FLEET = "/home/pipo/slm-fleet"
+FLEET = os.environ.get("GOTATO_FLEET", "/home/pipo/slm-fleet")
 INDEX = os.path.join(FLEET, "index.json")
-BUILDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "expert-builder.py")
+BUILDER = os.environ.get("GOTATO_BUILDER", os.path.join(os.path.dirname(os.path.abspath(__file__)), "expert-builder.py"))
 
 EXTS = {
     ".py": "python", ".pyw": "python", ".pyi": "python",

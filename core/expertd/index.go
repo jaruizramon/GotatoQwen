@@ -212,7 +212,7 @@ func loadSubIndex(path string) (*subIndex, error) {
 // ---- CLI helpers ----------------------------------------------------------
 func indexCmd(args []string) {
 	var root string = "/home/pipo/stack"
-	var out string = "/home/pipo/slm-fleet/subindex.json"
+	var out string = fleetDir + "/subindex.json"
 	var n int = 3
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--out" && i+1 < len(args) {
@@ -242,7 +242,7 @@ func resolveCmd(args []string) {
 		fmt.Println("usage: expertd resolve <file|text> [--index path]")
 		os.Exit(2)
 	}
-	var idxPath string = "/home/pipo/slm-fleet/subindex.json"
+	var idxPath string = fleetDir + "/subindex.json"
 	var text string
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--index" && i+1 < len(args) {

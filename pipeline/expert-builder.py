@@ -14,8 +14,8 @@ they are loaded on demand; only the active adapter touches RAM.
 import argparse, hashlib, json, os, subprocess, sys, time
 
 TRAINER = "/home/pipo/slm-fleet/train_lora.py"
-CONVERT = "/home/pipo/llama.cpp/convert_lora_to_gguf.py"
-VENV_PY = "/home/pipo/qwen-venv/bin/python"
+CONVERT = os.path.join(os.environ.get("GOTATO_LLAMA", "/home/pipo/llama.cpp"), "convert_lora_to_gguf.py")
+VENV_PY = os.environ.get("GOTATO_VENV_PY", "/home/pipo/qwen-venv/bin/python")
 BASE_GGUF = "Qwen3-0.6B-Q8_0.gguf"          # inference base (GGUF)
 HF_BASE = "Qwen/Qwen3-0.6B"                 # training base (HF, via cache)
 EXTS = {".py": "python", ".ts": "typescript", ".tsx": "typescript",

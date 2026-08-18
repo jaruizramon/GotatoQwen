@@ -20,8 +20,8 @@ Usage:
 """
 import argparse, json, os, re, subprocess, sys, time
 
-LLAMA_CLI = "/home/pipo/llama.cpp/build/bin/llama-cli"
-FLEET_DIR = "/home/pipo/slm-fleet"
+LLAMA_CLI = os.path.join(os.environ.get("GOTATO_LLAMA_BIN", "/home/pipo/llama.cpp/build/bin"), "llama-cli")
+FLEET_DIR = os.environ.get("GOTATO_FLEET", "/home/pipo/slm-fleet")
 INDEX = os.path.join(FLEET_DIR, "index.json")
 
 
