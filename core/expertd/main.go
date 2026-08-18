@@ -135,6 +135,10 @@ type expertEntry struct {
 	ErrorAt      float64 `json:"error_at,omitempty"`
 	Error        string  `json:"error,omitempty"`
 	Lora         string  `json:"lora,omitempty"`
+	// Mask: a sliced GGUF (ggslice output) - a full model file with the
+	// off-domain heads/neurons zeroed; served with -m, no adapter needed.
+	Mask         string  `json:"mask,omitempty"`
+	Kind         string  `json:"kind,omitempty"` // "mask" | "adapter"
 	Base         string  `json:"base,omitempty"`
 	TrainedAt    float64 `json:"trained_at,omitempty"`
 	TrainSeconds float64 `json:"train_seconds,omitempty"`

@@ -20,10 +20,20 @@ func main() {
 		tokcheckCmd(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "collect" {
+		collectCmd(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "mask" {
+		maskCmd(os.Args[2:])
+		return
+	}
 	if len(os.Args) < 5 {
 		fmt.Println("usage: gglora <model.gguf> <tensor> <m> <out.json>")
 		fmt.Println("       gglora train --base <model.gguf> --corpus <text> --out <adapter.gguf> [--ctx 256] [--stride 128] [--epochs 2] [--threads 4]")
 		fmt.Println("       gglora tokcheck --base <model.gguf> --text <s> [--verify --server :8082]")
+		fmt.Println("       gglora collect --base <model.gguf> --corpus <text> --domain <name>")
+		fmt.Println("       gglora mask --base <model.gguf> --domain <name> --out <masks/name.gguf>")
 		os.Exit(2)
 	}
 	var path string = os.Args[1]

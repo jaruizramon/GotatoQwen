@@ -125,16 +125,26 @@ func hasBackend(cfg *serveConfig, lang string) bool {
 func autostartLang(cfg *serveConfig, lang string) string {
 	idx := loadIndex()
 	e, ok := idx[lang]
-	if !ok || e.Status != "ready" || e.Lora == "" {
+	if !ok || e.Status != "ready" || (e.Lora == "" && e.Mask == "") {
 		return ""
 	}
 	base := fleetDir + "/" + e.Base
-	lora := fleetDir + "/" + e.Lora
-	if _, err := os.Stat(base); err != nil {
-		return ""
-	}
-	if _, err := os.Stat(lora); err != nil {
-		return ""
+	var servePath string = base
+	var lora string = ""
+	if e.Mask != "" {
+		// a mask slice IS the model: zeroed weights, no adapter
+		servePath = fleetDir + "/" + e.Mask
+		if _, err := os.Stat(servePath); err != nil {
+			return ""
+		}
+	} else {
+		lora = fleetDir + "/" + e.Lora
+		if _, err := os.Stat(base); err != nil {
+			return ""
+		}
+		if _, err := os.Stat(lora); err != nil {
+			return ""
+		}
 	}
 	var port int = 8084
 	for {
@@ -148,8 +158,12 @@ func autostartLang(cfg *serveConfig, lang string) string {
 		}
 	}
 	serverBin := strings.TrimSuffix(llamaCli, "llama-cli") + "llama-server"
-	cmd := exec.Command(serverBin, "-m", base, "--lora", lora,
-		"-t", "4", "-c", "4096", "--port", strconv.Itoa(port))
+	cmdArgs := []string{"-m", servePath}
+	if lora != "" {
+		cmdArgs = append(cmdArgs, "--lora", lora)
+	}
+	cmdArgs = append(cmdArgs, "-t", "4", "-c", "4096", "--port", strconv.Itoa(port))
+	cmd := exec.Command(serverBin, cmdArgs...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}

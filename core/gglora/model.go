@@ -243,6 +243,9 @@ func ropeBack(dq []float32, t int, headDim int, theta float64) {
 // ---- the model ------------------------------------------------------------
 
 type model struct {
+	// Col: when set, forward() folds per-layer activation energies into the
+	// salience accumulator (the ggslice collection mode; nil = no overhead).
+	Col *salCollector
 	NLayer, NHead, NKvHead, HeadDim, Hidden, Ffn int
 	Eps                                        float32
 	Theta                                      float64
@@ -417,6 +420,9 @@ func (m *model) forward(s *scratch, tokens []int) float32 {
 				}
 			}
 		})
+		if m.Col != nil {
+			m.Col.accumulateLayer(s, m, l, t)
+		}
 		// output projection + residual
 		zeroF32(s.Out)
 		layer.hO = layer.O.fwd(s.Out, s.AttnOut, t)
