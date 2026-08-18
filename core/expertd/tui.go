@@ -159,37 +159,55 @@ func (v *view) render() {
 	input := v.input
 	status := v.status
 	v.mu.Unlock()
-	_, w := termSize()
+	rows, w := termSize()
 	v.width = w
-	var sb strings.Builder
-	sb.WriteString("\033[H\033[2J")
+	// pinned bottom bar: status line (if any) + input line
+	barLines := 1
+	if status != "" {
+		barLines++
+	}
+	avail := rows - barLines
+	if avail < 3 {
+		avail = 3
+	}
+	// render every block to lines, then keep only the tail that fits
+	var all []string
 	for _, b := range blocks {
 		switch b.kind {
 		case bMeta:
 			if b.text != "" {
-				sb.WriteString(cDim + "  " + b.text + cReset + "\n\n")
+				all = append(all, cDim+"  "+b.text+cReset, "")
 			}
 		case bUser:
-			sb.WriteString(cGreen + cBold + "  you> " + cReset + "\n")
-			sb.WriteString(wrapText(b.text, w-4) + "\n\n")
+			all = append(all, cGreen+cBold+"  you> "+cReset, wrapText(b.text, w-4), "")
 		case bAssistant:
 			if b.tag != "" {
-				sb.WriteString(cDim + "  ── " + cBold + slmColor(b.tag) + b.tag +
-					cReset + cDim + " ──" + cReset + "\n")
+				all = append(all, cDim+"  ── "+cBold+slmColor(b.tag)+b.tag+
+					cReset+cDim+" ──"+cReset)
 			}
-			sb.WriteString(wrapText(b.text, w-4) + "\n\n")
+			all = append(all, wrapText(b.text, w-4), "")
 		case bTool:
-			sb.WriteString(cCyan + "  ⚙ " + b.tag + cReset + "\n")
+			all = append(all, cCyan+"  ⚙ "+b.tag+cReset)
 			if b.text != "" {
-				sb.WriteString(cDim + wrapText(b.text, w-8) + cReset + "\n")
+				all = append(all, cDim+wrapText(b.text, w-8)+cReset)
 			}
-			sb.WriteString("\n")
+			all = append(all, "")
 		}
 	}
-	if status != "" {
-		sb.WriteString(status + "\n\n")
+	if len(all) > avail {
+		all = all[len(all)-avail:]
 	}
+	var sb strings.Builder
+	sb.WriteString("\033[H\033[?25l\033[J") // home, hide cursor, clear down (no flash)
+	for _, l := range all {
+		sb.WriteString(l + "\n")
+	}
+	if status != "" {
+		sb.WriteString(status + "\n")
+	}
+	// the input line: always the last visible line
 	sb.WriteString(cGreen + "  you> " + cReset + input + " ")
+	sb.WriteString("\033[?25h") // show the cursor on the input
 	outMu.Lock()
 	_, _ = os.Stdout.WriteString(sb.String())
 	outMu.Unlock()
@@ -318,7 +336,7 @@ func chatCmd(args []string) {
 	}
 	pushBlock(bMeta, "", "GotatoQwen harness · "+mode+
 		" · session "+session+" · Ctrl-C quit")
-	theView.render()
+	requestRender()
 
 	keys := make(chan keyMsg, 64)
 	go stdinLoop(keys)
@@ -337,10 +355,12 @@ func chatCmd(args []string) {
 			if busy {
 				theView.render() // live spinner / elapsed
 			}
+		case <-renderReq:
+			theView.render()
 		case <-turnDone:
 			busy = false
 			abort = nil
-			theView.render()
+			requestRender()
 		case k, ok := <-keys:
 			if !ok {
 				if busy {
@@ -354,7 +374,7 @@ func chatCmd(args []string) {
 					close(abort)
 					abort = nil
 					setStatus(cRed + "  interrupted" + cReset)
-					theView.render()
+					requestRender()
 				}
 				continue
 			}
@@ -365,7 +385,7 @@ func chatCmd(args []string) {
 				line := strings.TrimSpace(input.String())
 				input.Reset()
 				if line == "" {
-					theView.render()
+					requestRender()
 					continue
 				}
 				if line == "/quit" || line == "/exit" {
@@ -374,7 +394,7 @@ func chatCmd(args []string) {
 				history = append(history, line)
 				histPos = len(history)
 				pushBlock(bUser, "", line)
-				theView.render()
+				requestRender()
 				busy = true
 				abort = make(chan bool)
 				if cowork {
@@ -388,27 +408,27 @@ func chatCmd(args []string) {
 					input.Reset()
 					input.WriteString(s[:len(s)-1])
 				}
-				theView.render()
+				requestRender()
 			case keyCtrlU:
 				input.Reset()
-				theView.render()
+				requestRender()
 			case keyUp:
 				if histPos > 0 {
 					histPos--
 					input.Reset()
 					input.WriteString(history[histPos])
-					theView.render()
+					requestRender()
 				}
 			case keyDown:
 				if histPos < len(history)-1 {
 					histPos++
 					input.Reset()
 					input.WriteString(history[histPos])
-					theView.render()
+					requestRender()
 				}
 			case keyChar:
 				input.WriteByte(k.ch)
-				theView.render()
+				requestRender()
 			}
 		}
 	}
@@ -417,6 +437,15 @@ func chatCmd(args []string) {
 func finishTurn() {
 	select {
 	case turnDone <- true:
+	default:
+	}
+}
+
+var renderReq = make(chan bool, 4)
+
+func requestRender() {
+	select {
+	case renderReq <- true:
 	default:
 	}
 }
@@ -455,7 +484,7 @@ func chatRun(gateway string, session string, prompt string, abort chan bool) {
 		select {
 		case <-abort:
 			finishTurn()
-			theView.render()
+			requestRender()
 			return
 		default:
 		}
@@ -495,7 +524,7 @@ func chatRun(gateway string, session string, prompt string, abort chan bool) {
 				appendAssistant(tag, frame.Content)
 			}
 			si++
-			theView.render()
+			requestRender()
 		}
 		if frame.Stop {
 			break
@@ -503,7 +532,7 @@ func chatRun(gateway string, session string, prompt string, abort chan bool) {
 	}
 	setStatus("")
 	finishTurn()
-	theView.render()
+	requestRender()
 }
 
 // ---- cowork mode: tool loop with live tool blocks ----------------------------
@@ -538,12 +567,12 @@ func coworkRun(backend string, session string, prompt string, useMCP bool, abort
 		select {
 		case <-abort:
 			finishTurn()
-			theView.render()
+			requestRender()
 			return
 		default:
 		}
 		setStatus(cYellow + "  ⟳ " + strings.Repeat("·", iter+1) + cReset)
-		theView.render()
+		requestRender()
 		body, _ := json.Marshal(map[string]any{
 			"messages": messages, "temperature": 0, "max_tokens": 400,
 			"enable_thinking": false})
@@ -586,7 +615,7 @@ func coworkRun(backend string, session string, prompt string, useMCP bool, abort
 			}
 			setStatus("")
 			finishTurn()
-			theView.render()
+			requestRender()
 			return
 		}
 		var call struct {
@@ -617,7 +646,7 @@ func coworkRun(backend string, session string, prompt string, useMCP bool, abort
 		} else {
 			pushBlock(bTool, label+" ✓", truncateText(result, 400))
 		}
-		theView.render()
+		requestRender()
 		messages = append(messages,
 			map[string]string{"role": "assistant", "content": content})
 		messages = append(messages,
@@ -626,7 +655,7 @@ func coworkRun(backend string, session string, prompt string, useMCP bool, abort
 	pushBlock(bTool, "loop", "exceeded 5 iterations")
 	setStatus("")
 	finishTurn()
-	theView.render()
+	requestRender()
 }
 
 func jsonArgsShort(args map[string]any) string {
