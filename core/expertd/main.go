@@ -85,6 +85,45 @@ var langSignals map[string][]*regexp.Regexp = map[string][]*regexp.Regexp{
 		regexp.MustCompile(`console\.log\(|=>\s*\{`)},
 	"rust": {regexp.MustCompile(`(?m)^\s*(fn |let mut |impl |pub |use )`),
 		regexp.MustCompile(`println!\(|unwrap\(\)|\.await`)},
+	"go": {regexp.MustCompile(`(?m)^\s*(package \w+|func |import |var |const |type )`),
+		regexp.MustCompile(`:=`), regexp.MustCompile(`fmt\.|\w+\.\w+\(`),
+		regexp.MustCompile(`\*\w+|\[\]\w+`)},
+}
+
+// detectLanguageN: detectLanguage plus the number of pattern hits (a
+// language is trusted when >= 2 distinct patterns fire; single weak hits
+// like "type hints" in English text are rejected).
+func detectLanguageN(text string, path string) (string, float64, int) {
+	lang, conf := detectLanguage(text, path)
+	head := text
+	if len(head) > 4000 {
+		head = head[:4000]
+	}
+	hits := 0
+	for _, p := range langSignals[lang] {
+		if p.MatchString(head) {
+			hits++
+		}
+	}
+	return lang, conf, hits
+}
+
+// looksLikeCode: crude gate - does this text contain code markers? English
+// task descriptions fail this, pasted code snippets pass it.
+func looksLikeCode(text string) bool {
+	var markers = []string{"package ", "func ", "def ", "fn ", "import ",
+		"const ", "var ", "let ", "pub ", "use ", "impl ", "class ",
+		"#include", "using ", ":=", "->", "::"}
+	var head string = text
+	if len(head) > 6000 {
+		head = head[:6000]
+	}
+	for _, m := range markers {
+		if strings.Contains(head, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- index schema (byte-compatible with the Python prototype) ----------
@@ -502,6 +541,8 @@ func main() {
 		os.Exit(route(target, gen, session, scopeCheckOn))
 	case "sessions":
 		sessionsCmd(os.Args[2:])
+	case "serve":
+		serveCmd(os.Args[2:])
 	case "bench":
 		bench(os.Args[2], 20)
 	case "index":

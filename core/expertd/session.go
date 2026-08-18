@@ -33,6 +33,7 @@ type turn struct {
 	ScopeEvent string  `json:"scope_event,omitempty"`
 	Escalation string  `json:"escalation,omitempty"`
 	Margin     float64 `json:"margin,omitempty"`
+	Pending    string  `json:"pending,omitempty"` // lang awaiting user consent
 }
 
 var sessionsPath string = fleetDir + "/sessions.jsonl" // overridden in applyEnv()
