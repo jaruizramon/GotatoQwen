@@ -1,0 +1,1 @@
+Write a short function that parses "2h30m" style duration strings into seconds, returning null on invalid input.

@@ -1,0 +1,1 @@
+Implement a typed function `debounce<T extends (...args: any[]) => void>(fn: T, ms: number)` returning a debounced version, with proper TypeScript generics.

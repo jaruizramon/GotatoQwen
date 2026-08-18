@@ -1,0 +1,1 @@
+Implement a `retry` helper in Rust that calls a closure returning Result, retrying with exponential backoff up to N attempts, using std only.

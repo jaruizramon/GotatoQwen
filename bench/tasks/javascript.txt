@@ -1,0 +1,1 @@
+Implement a `deepMerge(target, source)` function in plain JavaScript that recursively merges plain objects without mutating either input.

@@ -1,0 +1,1 @@
+Implement a function `chunked(seq, n)` that yields successive n-sized chunks from a sequence, with docstring and type hints, Python 3.10+ style.

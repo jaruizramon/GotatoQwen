@@ -1,0 +1,8 @@
+__pycache__/
+*.gguf
+*.log
+.venv/
+models/
+corpus/
+adapters/
+index.json
