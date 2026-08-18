@@ -800,7 +800,11 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 				prompt[len(prompt)-maxPromptChars:]
 		}
 		req := completionReq{Prompt: prompt, NPredict: nPredict,
-			Session: session, RoutePrompt: lastUser, Stream: creq.Stream, SkipBridge: true}
+			Session: session, RoutePrompt: lastUser, Stream: creq.Stream, SkipBridge: true,
+			// chat sessions: the window is bounded by truncation anyway, so
+			// chaining is only worth its 2B summarizer cost for LONG histories
+			// (~12K positions = dozens of potato turns). Per-request override.
+			ChainCap: 12000}
 		plan := routeCompletion(cfg, &req)
 		if plan.override != "" {
 			// escalation / delegation text arrives as a normal assistant reply
@@ -844,7 +848,10 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		if bridgeZH && content != "" {
 			content = translateToEN(cfg, content)
 		}
-		content = stripThink(content)
+		if stripped := stripThink(content); stripped != "" {
+			content = stripped // a fully-think reply stays visible: an empty
+			// message reads as empty-stop to omp and triggers its retry loop
+		}
 		if content != "" {
 			appendContent(req.Session, "assistant", content)
 		}
@@ -896,9 +903,36 @@ func streamRelayChat(w http.ResponseWriter, resp *http.Response, req *completion
 	id := "chatcmpl-gotato"
 	created := time.Now().Unix()
 	var content strings.Builder
+	var reasoningText strings.Builder
+	var emittedContent bool = false
 	var tokens int = 0
 	var promptTokens int = 0
-	inThink := false // <think> spans chunks; drop everything until </think>
+	inThink := false // <think> spans chunks; content inside routes to reasoning
+	// emitContentDelta / emitReasoningDelta: OpenAI chunk writers.
+	emitContentDelta := func(text string) {
+		if text == "" {
+			return
+		}
+		emittedContent = true
+		chunk := fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{"content":%s},"finish_reason":null}]}`,
+			jsonString(id), created, jsonString(slmTag), jsonString(text))
+		fmt.Fprintf(w, "data: %s\n\n", chunk)
+		if ok {
+			flusher.Flush()
+		}
+	}
+	emitReasoningDelta := func(text string) {
+		if text == "" {
+			return
+		}
+		reasoningText.WriteString(text)
+		chunk := fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{"reasoning_content":%s},"finish_reason":null}]}`,
+			jsonString(id), created, jsonString(slmTag), jsonString(text))
+		fmt.Fprintf(w, "data: %s\n\n", chunk)
+		if ok {
+			flusher.Flush()
+		}
+	}
 	sc := bufio.NewScanner(resp.Body)
 	sbuf := getScanBuf()
 	defer putScanBuf(sbuf)
@@ -920,31 +954,48 @@ func streamRelayChat(w http.ResponseWriter, resp *http.Response, req *completion
 			continue
 		}
 		if frame.Content != "" {
-			if inThink {
-				if j := strings.Index(frame.Content, "</think>"); j >= 0 {
-					frame.Content = frame.Content[j+len("</think>"):]
-					inThink = false
-				} else {
-					frame.Content = ""
+			// route <think>…</think> to delta.reasoning_content instead of
+			// dropping it: OMP renders reasoning as its Thinking block, and a
+			// fully-stripped reply would read as empty-stop and trigger
+			// omp's retry loop (the empty-stop bug).
+			var text string = frame.Content
+			for {
+				var i int = strings.Index(text, "<think>")
+				if i < 0 {
+					break
 				}
-			}
-			if i := strings.Index(frame.Content, "<think>"); i >= 0 && !inThink {
-				if j := strings.Index(frame.Content[i:], "</think>"); j >= 0 {
-					frame.Content = frame.Content[:i] + frame.Content[i+j+len("</think>"):]
-				} else {
-					frame.Content = frame.Content[:i]
+				if i > 0 {
+					content.WriteString(text[:i])
+					emitContentDelta(text[:i])
+				}
+				var j int = strings.Index(text[i:], "</think>")
+				if j < 0 {
+					text = text[i+len("<think>"):]
 					inThink = true
+					break
 				}
+				text = text[i+len("<think>") : i+j]
+				emitReasoningDelta(text)
+				text = frame.Content[i+j+len("</think>"):]
 			}
-			if frame.Content == "" {
+			if inThink {
+				// remainder of a chunk inside an open think block
+				if j := strings.Index(text, "</think>"); j >= 0 {
+					emitReasoningDelta(text[:j])
+					text = text[j+len("</think>"):]
+					inThink = false
+					if text != "" {
+						content.WriteString(text)
+						emitContentDelta(text)
+					}
+				} else {
+					emitReasoningDelta(text)
+				}
 				continue
 			}
-			content.WriteString(frame.Content)
-			chunk := fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{"content":%s},"finish_reason":null}]}`,
-				jsonString(id), created, jsonString(slmTag), jsonString(frame.Content))
-			fmt.Fprintf(w, "data: %s\n\n", chunk)
-			if ok {
-				flusher.Flush()
+			if text != "" {
+				content.WriteString(text)
+				emitContentDelta(text)
 			}
 		}
 		if frame.Stop {
@@ -954,6 +1005,14 @@ func streamRelayChat(w http.ResponseWriter, resp *http.Response, req *completion
 				jsonString(id), created, jsonString(slmTag), promptTokens, tokens, promptTokens+tokens)
 			fmt.Fprintf(w, "data: %s\n\n", final)
 		}
+	}
+	// empty-stop guard: if the ENTIRE reply was thinking (unclosed <think>
+	// burned the whole budget), surface it as content so omp never sees an
+	// empty stop - empty stops trigger its retry loop, doubling the cost.
+	if !emittedContent && reasoningText.Len() > 0 {
+		var fallback string = strings.TrimSpace(reasoningText.String())
+		content.WriteString(fallback)
+		emitContentDelta(fallback)
 	}
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	if ok {
