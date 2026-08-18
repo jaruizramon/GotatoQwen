@@ -44,6 +44,36 @@ func httpPostJSON(url string, body []byte) ([]byte, error) {
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
 }
+// httpClientSlow: for genuinely long operations (the tool loop, context
+// compaction) where a contended potato can exceed the 120s interactive cap.
+var httpClientSlow = &http.Client{
+	Timeout: 600 * time.Second,
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:        16,
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     60 * time.Second,
+	},
+}
+
+// httpPostJSONSlow: POST with the long timeout (tool loop / compaction).
+func httpPostJSONSlow(url string, body []byte) ([]byte, error) {
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClientSlow.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
 // ---- 1MB scanner buffer pool ---------------------------------------------
 // bufio.Scanner needs a buffer big enough for the longest line (a huge
 // streamed SSE frame or a giant ledger turn). Allocating 1MB per request

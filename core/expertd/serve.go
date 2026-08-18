@@ -646,6 +646,67 @@ func mustJSON(v any) string {
 // memstatsHandler: GET /memstats - runtime heap + goroutine state, so
 // memory leaks in the gateway are observable (the OMP status line polls
 // /slms; a growing HeapAlloc at constant load means a leak).
+// toolNames: the builtin tool set the chat contract exposes.
+var toolNames = []string{"list_dir", "read_file", "run_command"}
+
+// braceClose: index just past the brace that closes the object opening at
+// bi (nested-brace aware; -1 if unclosed).
+func braceClose(tail string, bi int) int {
+	var depth int = 0
+	for i := bi; i < len(tail); i++ {
+		switch tail[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i + 1
+			}
+		}
+	}
+	return -1
+}
+
+// partialCallHold: the longest suffix of tail that is a proper prefix of a
+// call pattern (wrapped or bare) - a chunk may have cut the pattern mid-way,
+// and emitting it would leak the call JSON to the client.
+func partialCallHold(tail string) int {
+	patterns := []string{"<tool_call>"}
+	for _, tn := range toolNames {
+		patterns = append(patterns, `{"name":"`+tn+`","arguments":{`)
+	}
+	var maxLen int = 0
+	for _, p := range patterns {
+		if len(p) > maxLen {
+			maxLen = len(p)
+		}
+	}
+	limit := len(tail)
+	if limit > maxLen-1 {
+		limit = maxLen - 1
+	}
+	for l := limit; l >= 1; l-- {
+		suffix := tail[len(tail)-l:]
+		for _, p := range patterns {
+			if strings.HasPrefix(p, suffix) {
+				return len(tail) - l
+			}
+		}
+	}
+	return -1
+}
+
+// toolBrain: the instruct 1.7B slice that drives the tool loop (the proven
+// cowork model); falls back to the generalist if it is not registered.
+func toolBrain(cfg *serveConfig) string {
+	cfg.mu.Lock()
+	defer cfg.mu.Unlock()
+	if b, ok := cfg.backends["translator"]; ok {
+		return b
+	}
+	return cfg.backends["general"]
+}
+
 // chatChainCap: the compaction trigger for chat sessions. 3600 (~88% of the
 // backend's 4096 window) once the dedicated summarizer slice is ready;
 // 12000 while the 2B fallback would make every compaction a 1-2min stall.
@@ -787,7 +848,10 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 				sb.WriteString("<|im_start|" + m.Role + "\n" + content + "<|im_end|>\n")
 			}
 		}
-		// open the assistant turn so the SLM continues it
+		// open the assistant turn so the SLM continues it; the tool contract
+		// rides in the context so the routed SLM can ask for tools (the
+		// gateway executes them and loops with the instruct brain).
+		sb.WriteString(chatToolBlock())
 		sb.WriteString("<|im_start|>assistant\n")
 		nPredict := creq.MaxTokens
 		if nPredict <= 0 {
@@ -847,7 +911,7 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		w.Header().Set("X-Gotato-SLM", plan.slmTag)
 		if strings.Contains(plan.fwdBody, "\"stream\":true") ||
 			strings.Contains(plan.fwdBody, "\"stream\": true") {
-			streamRelayChat(w, resp, &req, plan.target, plan.slmTag, plan.chained, t0, plan.servedLang)
+			streamRelayChat(cfg, w, resp, &req, plan.target, plan.slmTag, plan.chained, t0, plan.servedLang)
 			return
 		}
 		out, _ := io.ReadAll(resp.Body)
@@ -869,6 +933,13 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		content := cr.Content
 		if bridgeZH && content != "" {
 			content = translateToEN(cfg, content)
+		}
+		// tool loop (non-stream): the routed SLM asked for tools -> run the
+		// instruct-brain loop and answer with the final result.
+		if m := toolCallRe.FindStringSubmatch(cr.Content); m != nil {
+			var final string
+			final, _ = coworkTurn(toolBrain(cfg), session, lastUser, false)
+			content = "\n[executed tool calls]\n" + final
 		}
 		if stripped := stripThink(content); stripped != "" {
 			content = stripped // a fully-think reply stays visible: an empty
@@ -912,7 +983,7 @@ func writeChatCompletion(w http.ResponseWriter, content string, model string, pr
 // Frames are transformed and flushed INCREMENTALLY - buffering the whole
 // backend stream would stall OpenAI clients (omp aborts after ~15s with
 // zero bytes).
-func streamRelayChat(w http.ResponseWriter, resp *http.Response, req *completionReq,
+func streamRelayChat(cfg *serveConfig, w http.ResponseWriter, resp *http.Response, req *completionReq,
 	target string, slmTag string, chained bool, t0 time.Time, servedLang string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -930,6 +1001,9 @@ func streamRelayChat(w http.ResponseWriter, resp *http.Response, req *completion
 	var tokens int = 0
 	var promptTokens int = 0
 	inThink := false // <think> spans chunks; content inside routes to reasoning
+	var toolTail strings.Builder
+	var toolCalls []string
+	var toolSeen bool = false
 	// emitContentDelta / emitReasoningDelta: OpenAI chunk writers.
 	emitContentDelta := func(text string) {
 		if text == "" {
@@ -1006,18 +1080,77 @@ func streamRelayChat(w http.ResponseWriter, resp *http.Response, req *completion
 					emitReasoningDelta(text[:j])
 					text = text[j+len("</think>"):]
 					inThink = false
-					if text != "" {
-						content.WriteString(text)
-						emitContentDelta(text)
-					}
 				} else {
 					emitReasoningDelta(text)
+					continue
 				}
-				continue
 			}
-			if text != "" {
-				content.WriteString(text)
-				emitContentDelta(text)
+						// suppress <tool_call> spans (stateful across chunks): the call
+			// JSON never reaches the client; at stream end the gateway runs
+			// the tool loop with the instruct brain and streams the result.
+			// Tolerates BOTH the contract form (<tool_call>…</tool_call>) and
+			// the bare JSON the tiny models actually emit.
+			toolTail.WriteString(text)
+			for {
+				tail := toolTail.String()
+				wi := strings.Index(tail, "<tool_call>")
+				bi := -1
+				for _, tn := range toolNames {
+					if k := strings.Index(tail, `{"name":"`+tn+`","arguments":{`); k >= 0 && (bi < 0 || k < bi) {
+						bi = k
+					}
+				}
+				var hold int = -1
+				var wend int = -1
+				if wi >= 0 {
+					if j := strings.Index(tail[wi:], "</tool_call>"); j >= 0 {
+						wend = wi + j + len("</tool_call>")
+					} else {
+						hold = wi
+					}
+				}
+				if bi >= 0 && (wi < 0 || bi < wi) {
+					if j := braceClose(tail, bi); j >= 0 {
+						wend = j
+					} else {
+						hold = bi
+					}
+				}
+				if wend >= 0 {
+					start := wi
+					if wi < 0 || (bi >= 0 && bi < wi) {
+						start = bi
+					}
+					if start > 0 {
+						content.WriteString(tail[:start])
+						emitContentDelta(tail[:start])
+					}
+					toolSeen = true
+					toolCalls = append(toolCalls, tail[start:wend])
+					toolTail.Reset()
+					toolTail.WriteString(tail[wend:])
+					continue
+				}
+				// no complete call: hold a partial-call suffix (a chunk may
+				// have cut the pattern mid-way) before emitting anything
+				if hold < 0 {
+					hold = partialCallHold(tail)
+				}
+				if hold >= 0 {
+					if hold > 0 {
+						content.WriteString(tail[:hold])
+						emitContentDelta(tail[:hold])
+					}
+					toolTail.Reset()
+					toolTail.WriteString(tail[hold:])
+					break
+				}
+				if tail != "" {
+					content.WriteString(tail)
+					emitContentDelta(tail)
+				}
+				toolTail.Reset()
+				break
 			}
 		}
 		if frame.Stop {
@@ -1026,6 +1159,25 @@ func streamRelayChat(w http.ResponseWriter, resp *http.Response, req *completion
 			final := fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
 				jsonString(id), created, jsonString(slmTag), promptTokens, tokens, promptTokens+tokens)
 			fmt.Fprintf(w, "data: %s\n\n", final)
+		}
+	}
+	// tool loop: the routed SLM asked for tools -> execute with the
+	// instruct brain (the proven cowork model) and stream the final answer.
+	if toolSeen || (toolTail.Len() > 0 && strings.Contains(toolTail.String(), `{"name":"`)) {
+		var transcript string
+		var final string
+		final, transcript = coworkTurn(toolBrain(cfg), req.Session, req.RoutePrompt, false)
+		var n int = len(toolCalls)
+		if strings.Count(toolTail.String(), `{"name":"`) > 0 {
+			n++
+		}
+		var marker string = fmt.Sprintf("\n[executed %d tool call(s)]\n", n)
+		content.WriteString(marker)
+		emitContentDelta(marker)
+		content.WriteString(final)
+		emitContentDelta(final)
+		if transcript != "" {
+			appendContent(req.Session, "system", "TOOLS: "+transcript)
 		}
 	}
 	// empty-stop guard: if the ENTIRE reply was thinking (unclosed <think>

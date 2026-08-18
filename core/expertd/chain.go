@@ -146,7 +146,7 @@ func summarizeVia(cfg *serveConfig, history string) string {
 		target = cfg.backends["general"]
 	}
 	cfg.mu.Unlock()
-	resp, err := httpPostJSON(target+"/completion", body)
+	resp, err := httpPostJSONSlow(target+"/completion", body)
 	if err != nil {
 		return ""
 	}

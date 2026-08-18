@@ -15,7 +15,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"time"
 )
 
 var toolCallRe = regexp.MustCompile(`<tool_call>(.*?)</tool_call>`)
@@ -66,7 +65,7 @@ func coworkTurn(backend string, session string, prompt string, useMCP bool) (str
 		body, _ := json.Marshal(map[string]any{
 			"messages": messages, "temperature": 0, "max_tokens": 400,
 			"enable_thinking": false})
-		resp, err := httpPostJSON(backend+"/v1/chat/completions", body)
+		resp, err := httpPostJSONSlow(backend+"/v1/chat/completions", body)
 		if err != nil {
 			return "cowork backend unreachable: " + err.Error(), transcript.String()
 		}
@@ -140,9 +139,13 @@ func coworkTurn(backend string, session string, prompt string, useMCP bool) (str
 	return "tool loop exceeded 5 iterations", transcript.String()
 }
 
-// approveCommand: interactive y/N gate for run_command.
+// approveCommand: y/N gate for run_command. The TUI asks interactively;
+// the headless gateway has no tty, so it denies unless GOTATO_APPROVE=1.
 func approveCommand(name string) bool {
 	if name != "run_command" {
+		return true
+	}
+	if os.Getenv("GOTATO_APPROVE") == "1" {
 		return true
 	}
 	fmt.Print("  [approval] run this command? [y/N] ")
@@ -154,4 +157,16 @@ func approveCommand(name string) bool {
 	return strings.TrimSpace(strings.ToLower(line)) == "y"
 }
 
-var _ = time.Now
+// chatToolBlock: the compact tool contract injected into chat prompts so
+// the routed SLM can ask for tools; the gateway executes and loops with
+// the instruct brain (see streamRelayChat).
+func chatToolBlock() string {
+	return "\nAVAILABLE TOOLS:\n" +
+		"- list_dir(path): list files in a directory\n" +
+		"- read_file(path): read a file\n" +
+		"- run_command(command): run a shell command (approval may be required)\n" +
+		"When you need to inspect files or run commands, emit EXACTLY one " +
+		"<tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call> and wait " +
+		"for the result. Never invent file contents; only report what the tools " +
+		"returned.\n"
+}
