@@ -184,6 +184,18 @@ Q4_K_M on :8086) via /v1/chat/completions with a hard system directive - base
 models narrate instead of translating. Warm slots break determinism:
 cache_prompt is always false (the chain feature rebuilds prefixes instead).
 
+### Cowork + MCP (`expertd chat --cowork [--mcp]`)
+
+The TUI's tool-use mode: the instruct 1.7B (:8086) gets a tool registry and
+emits `<tool_call>{"name":...,"arguments":{...}}</tool_call>`; the harness
+executes and feeds results back (ReAct loop, max 5 iterations). Tools:
+list_dir, read_file, run_command (approval env-gated: GOTATO_APPROVE=1).
+`--mcp` routes the tools through a REAL MCP server: `expertd mcp` speaks
+JSON-RPC 2.0 over stdio (initialize / notifications/initialized /
+tools/list / tools/call) and the client spawns the same binary. Honest
+limits: the 1.7B's tool fidelity is real but embellishes - faithfulness
+scales with model size (host a 4B+ instruct on the 40GB box for production).
+
 ## 8. Test harness
 
 ```bash

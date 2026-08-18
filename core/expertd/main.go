@@ -545,6 +545,10 @@ func main() {
 		serveCmd(os.Args[2:])
 	case "chat":
 		chatCmd(os.Args[2:])
+	case "mcp":
+		// bundled MCP server: spawn and speak JSON-RPC on stdio.
+		// run_command approval is env-gated: GOTATO_APPROVE=1 permits it.
+		mcpServerLoop(os.Getenv("GOTATO_APPROVE") == "1")
 	case "bench":
 		bench(os.Args[2], 20)
 	case "index":
