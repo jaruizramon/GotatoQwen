@@ -132,6 +132,24 @@ expert: `pipeline/train_lora.py --base-model unsloth/Qwen3.5-2B` (needs
 **Verify**: `resolve` on a code task prints a top hit with a language; a
 nonsense string prints `no hits -> tier-3: streamed LLM`.
 
+## 7.5 The gateway (the llama harness)
+
+`expertd serve` (default :8090) fronts the llama-servers and runs the scope
+protocol on EVERY request. Use the gateway instead of hitting llama-server
+directly - the raw server has no scope awareness.
+
+```bash
+curl http://localhost:8090/completion -d '{"prompt":"...", "n_predict":64, "session":"s1"}'
+```
+
+Behavior: in-scope -> forwarded to the owning SLM (X-Gotato-Backend header);
+out-of-scope vs session owner -> asks "shall we delegate an SLM for X?";
+no slice running -> asks "add a X element to the stack..."; user says
+"yes" -> gateway autostarts the slice's llama-server (expert adapter from
+index.json) on :8084+, adopts the session owner, and the next task hits it.
+Sessions ledger: `expertd sessions`. Backends config: serve.go
+defaultServeConfig() - the python expert is :8081, 2B :8082, 4B :8083.
+
 ## 8. Test harness
 
 ```bash
