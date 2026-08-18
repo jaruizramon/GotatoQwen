@@ -102,6 +102,35 @@ type view struct {
 var theView = &view{}
 var outMu sync.Mutex
 
+// slmColor: deterministic per-SLM color. Known fleet members get fixed
+// colors; unknown bases (autostarted slices, new experts) get a stable
+// palette color from their name hash, so the same SLM always renders the
+// same color.
+func slmColor(tag string) string {
+	base := tag
+	if i := strings.Index(tag, " \u00b7 "); i >= 0 {
+		base = tag[:i]
+	}
+	switch base {
+	case "python-expert":
+		return "\033[92m" // bright green
+	case "2b-general":
+		return "\033[96m" // bright cyan
+	case "4b-general":
+		return "\033[93m" // bright yellow
+	case "cowork(1.7b-instruct)", "1.7b-instruct":
+		return "\033[95m" // bright magenta
+	}
+	var palette []string = []string{
+		"\033[91m", "\033[94m", "\033[95m", "\033[93m", "\033[92m", "\033[96m"}
+	var h int = 0
+	var i int = 0
+	for i = 0; i < len(base); i++ {
+		h = (h*31 + int(base[i])) % 997
+	}
+	return palette[h%len(palette)]
+}
+
 func wrapText(text string, width int) string {
 	if width <= 0 {
 		return text
@@ -145,7 +174,8 @@ func (v *view) render() {
 			sb.WriteString(wrapText(b.text, w-4) + "\n\n")
 		case bAssistant:
 			if b.tag != "" {
-				sb.WriteString(cDim + "  ── " + cBold + b.tag + cReset + cDim + " ──" + cReset + "\n")
+				sb.WriteString(cDim + "  ── " + cBold + slmColor(b.tag) + b.tag +
+					cReset + cDim + " ──" + cReset + "\n")
 			}
 			sb.WriteString(wrapText(b.text, w-4) + "\n\n")
 		case bTool:
@@ -313,6 +343,10 @@ func chatCmd(args []string) {
 			theView.render()
 		case k, ok := <-keys:
 			if !ok {
+				if busy {
+					// stdin closed mid-turn: let the turn finish, then exit
+					<-turnDone
+				}
 				return
 			}
 			if busy {
@@ -444,8 +478,8 @@ func chatRun(gateway string, session string, prompt string, abort chan bool) {
 			cur := content.String()
 			if strings.Contains(cur, "<think>") && !strings.Contains(cur, "</think>") {
 				thinking = true
-				setStatus(cYellow + "  ⟳ Thinking " + cRev + " " + tag + " " + cReset +
-					cYellow + " " + spinner[si%4] + " " +
+				setStatus(cYellow + "  ⟳ Thinking... " + cBold + slmColor(tag) + tag +
+					cReset + cYellow + " " + spinner[si%4] + " " +
 					fmt.Sprintf("%.0fs", time.Since(start).Seconds()) + cReset)
 			}
 			if thinking {
@@ -548,7 +582,7 @@ func coworkRun(backend string, session string, prompt string, useMCP bool, abort
 			answer = strings.ReplaceAll(answer, "</tool_call>", "")
 			answer = strings.TrimSpace(answer)
 			if answer != "" {
-				pushBlock(bAssistant, "cowork(1.7b-instruct)", answer)
+				pushBlock(bAssistant, "cowork(1.7b-instruct)", answer) // tag colored in render
 			}
 			setStatus("")
 			finishTurn()
