@@ -10,11 +10,10 @@
 # usage: bash testrun.sh [--no-servers] [--no-bench] [--no-demo] [--interactive]
 set -uo pipefail
 cd "$(dirname "$0")"
-F=/home/pipo/slm-fleet
-B=/home/pipo/llama.cpp/build/bin
-EXPERD=$F/expertd/expertd
-[ -x "$EXPERD" ] || EXPERD=/home/pipo/GotatoQwen/core/expertd/expertd
-TASKS=/home/pipo/laptop/tasks
+F="${GOTATO_FLEET:-$HOME/slm-fleet}"
+B="${GOTATO_LLAMA_BIN:-$HOME/llama.cpp/build/bin}"
+EXPERD="${GOTATO_EXPERD:-$(cd "$(dirname "$0")/.." && pwd)/core/expertd/expertd}"
+TASKS="${GOTATO_TASKS:-$(cd "$(dirname "$0")" && pwd)/tasks}"
 OUT=$F/testrun
 mkdir -p "$OUT"
 NO_SERVERS=0; NO_BENCH=0; NO_DEMO=0; INTERACTIVE=0
@@ -38,11 +37,11 @@ if [ "$NO_SERVERS" = "0" ]; then
   echo "== [2/5] STARTING llama-servers =="
   pkill -x llama-server 2>/dev/null; sleep 1
   nohup $B/llama-server -m $F/Qwen3-0.6B-Q8_0.gguf --lora $F/adapters/python.gguf \
-      -t 4 -c 4096 --port 8081 > $OUT/server-python.log 2>&1 &
+      -t 4 -c 4096 -np 1 --port 8081 > $OUT/server-python.log 2>&1 &
   nohup $B/llama-server -m $F/Qwen3.5-2B-Q4_K_M.gguf \
-      -t 4 -c 4096 --port 8082 > $OUT/server-2b.log 2>&1 &
+      -t 4 -c 4096 -np 1 --port 8082 > $OUT/server-2b.log 2>&1 &
   nohup $B/llama-server -m $F/Qwen3.5-4B-Q4_K_M.gguf \
-      -t 4 -c 4096 --port 8083 > $OUT/server-4b.log 2>&1 &
+      -t 4 -c 4096 -np 1 --port 8083 > $OUT/server-4b.log 2>&1 &
   sleep 3  # let the binds settle before polling
   for port in 8081 8082 8083; do
     for i in $(seq 1 90); do

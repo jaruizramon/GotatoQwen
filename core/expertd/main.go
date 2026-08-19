@@ -41,27 +41,32 @@ import (
 
 var fleetDir string = "/home/pipo/slm-fleet"
 var indexPath string = fleetDir + "/index.json"
-var builderPath string = fleetDir + "/expert-builder.py"
-var venvPython string = "/home/pipo/qwen-venv/bin/python"
 var llamaCli string = "/home/pipo/llama.cpp/build/bin/llama-cli"
+var ggloraBin string = "" // resolved in applyEnv: repo core/gglora/gglora
 
 // applyEnv: the agent-setup contract. Every machine-specific path can be
 // overridden by environment variables, so a fresh checkout needs no edits:
 //   GOTATO_FLEET     fleet dir (models, adapters, index, sessions, sub-index)
 //   GOTATO_LLAMA_BIN llama.cpp build/bin dir (llama-cli, llama-server, ...)
-//   GOTATO_VENV_PY   the python interpreter of the project venv
+//   GOTATO_GGLORA    the Go LoRA trainer binary (default: <repo>/core/gglora/gglora)
+// No python anywhere: corpus collect, LoRA training and adapter writing are
+// all Go (expertd build + gglora train).
 func applyEnv() {
 	if v := os.Getenv("GOTATO_FLEET"); v != "" {
 		fleetDir = v
 		indexPath = fleetDir + "/index.json"
-		builderPath = fleetDir + "/expert-builder.py"
 		sessionsPath = fleetDir + "/sessions.jsonl"
 	}
 	if v := os.Getenv("GOTATO_LLAMA_BIN"); v != "" {
 		llamaCli = v + "/llama-cli"
 	}
-	if v := os.Getenv("GOTATO_VENV_PY"); v != "" {
-		venvPython = v
+	if v := os.Getenv("GOTATO_GGLORA"); v != "" {
+		ggloraBin = v
+	}
+	if ggloraBin == "" {
+		if self, err := os.Executable(); err == nil {
+			ggloraBin = filepath.Join(filepath.Dir(self), "..", "gglora", "gglora")
+		}
 	}
 }
 
@@ -325,8 +330,10 @@ func watch(stack string, interval time.Duration, once bool) {
 			if err != nil {
 				continue
 			}
-			cmd := exec.Command("nice", "-n", "10", venvPython, builderPath, sc.Lang,
-				"--fleet", fleetDir, "--stack", stack)
+			// the builder is this same binary: `expertd build` collects the
+			// corpus, trains with gglora (Go, no python) and publishes index.json
+			self, _ := os.Executable()
+			cmd := exec.Command("nice", "-n", "10", self, "build", sc.Lang, stack)
 			cmd.Stdout = logFile
 			cmd.Stderr = logFile
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -485,11 +492,20 @@ func bench(stack string, rounds int) {
 func main() {
 	debug.SetGCPercent(-1) // the whole point: no garbage collector
 	applyEnv()
+	langCatalogInit()
 	if len(os.Args) < 2 {
-		fmt.Println("usage: expertd scan|detect|watch|route|bench|index|resolve ...")
+		fmt.Println("usage: expertd scan|detect|watch|route|bench|index|resolve|langs|oracle ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "build":
+		buildCmd(os.Args[2:])
+	case "langs":
+		langsCmd(os.Args[2:])
+	case "stacks":
+		stacksCmd(os.Args[2:])
+	case "oracle":
+		oracleCmd(os.Args[2:])
 	case "scan":
 		for _, sc := range scanDir(os.Args[2]) {
 			fmt.Printf("%s: %d files, sig=%s\n", sc.Lang, len(sc.Files), sc.Signature)

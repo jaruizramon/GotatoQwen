@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,7 +32,7 @@ var trainThreads int = 4
 
 // parallel: run fn over [0,n) in `threads` goroutines over disjoint chunks.
 func parallel(n int, fn func(lo int, hi int)) {
-	if trainThreads <= 1 || n < 64 {
+	if trainThreads <= 1 || n < 4 {
 		fn(0, n)
 		return
 	}
@@ -62,6 +63,24 @@ func parallel(n int, fn func(lo int, hi int)) {
 // adapter.type, general.name, adapter.lora.alpha, general.quantization_version}
 // and f32 tensors <base>.lora_a [in, r] / <base>.lora_b [r, out], stored
 // out-major (offset = j*in + k) exactly like the in-memory A/B slices.
+
+// clipGrads: per-tensor max-norm clipping (max L2 norm 1.0). Standard
+// stability guard: one bad sample must not explode the AdamW state.
+func clipGrads(gs ...[]float32) {
+	for _, g := range gs {
+		var n2 float64 = 0
+		var i int = 0
+		for i = 0; i < len(g); i++ {
+			n2 += float64(g[i]) * float64(g[i])
+		}
+		if n2 > 1.0 {
+			var scale float64 = 1.0 / math.Sqrt(n2)
+			for i = 0; i < len(g); i++ {
+				g[i] = float32(float64(g[i]) * scale)
+			}
+		}
+	}
+}
 
 func writeAdapterGGUF(path string, name string, m *model, alpha float32) error {
 	type tpair struct {
@@ -205,6 +224,8 @@ func f32Bytes(v []float32) []byte {
 func trainCmd(args []string) {
 	var base, corpus, out, name string
 	var ctx, stride, epochs int = 256, 128, 2
+	var window int = 0 // 0 = full causal attention (parity harness default)
+	var profilePath string = ""
 	var i int = 0
 	for i = 0; i < len(args); i++ {
 		switch args[i] {
@@ -232,22 +253,37 @@ func trainCmd(args []string) {
 		case "--threads":
 			trainThreads = atoi(args[i+1])
 			i++
+		case "--window":
+			window = atoi(args[i+1])
+			i++
+		case "--profile":
+			profilePath = args[i+1]
+			i++
 		}
 	}
 	if base == "" || corpus == "" || out == "" {
-		fmt.Println("usage: gglora train --base <model.gguf> --corpus <text> --out <adapter.gguf> [--ctx] [--stride] [--epochs] [--threads]")
+		fmt.Println("usage: gglora train --base <model.gguf> --corpus <text> --out <adapter.gguf> [--ctx] [--stride] [--epochs] [--threads] [--window]")
 		os.Exit(2)
 	}
 	if name == "" {
 		name = "gotato-slice"
 	}
 	t0 := time.Now()
+	if profilePath != "" {
+		var pf *os.File
+		pf, _ = os.Create(profilePath)
+		if pf != nil {
+			_ = pprof.StartCPUProfile(pf)
+			defer pprof.StopCPUProfile()
+		}
+	}
 	fmt.Printf("[train] loading %s ...\n", base)
 	m, err := loadModel(base)
 	if err != nil {
 		fmt.Println("load:", err)
 		os.Exit(1)
 	}
+	m.Window = window
 	fmt.Printf("[train] model: %d layers, hidden %d, heads %d/%d, ffn %d, vocab %d (%.0fs)\n",
 		m.NLayer, m.Hidden, m.NHead, m.NKvHead, m.Ffn, m.Vocab, time.Since(t0).Seconds())
 	g, err := loadGGUF(base)
@@ -276,11 +312,14 @@ func trainCmd(args []string) {
 		samples = append(samples, s)
 	}
 	if len(samples) == 0 {
-		samples = append(samples, ids[:ctx])
+		// corpus shorter than ctx: train on the whole sequence as one sample
+		var s []int = make([]int, len(ids))
+		copy(s, ids)
+		samples = append(samples, s)
 	}
 	fmt.Printf("[train] %d samples (ctx %d, stride %d), %d threads\n",
 		len(samples), ctx, stride, trainThreads)
-	var s *scratch = newScratch(ctx, m)
+	var s *scratch = newScratch(ctx, m, trainThreads)
 	var step int = 0
 	for ep := 1; ep <= epochs; ep++ {
 		var tot float32 = 0
@@ -300,18 +339,42 @@ func trainCmd(args []string) {
 				layer.Up.zeroGrads()
 				layer.Down.zeroGrads()
 			}
+			s.T = len(tokens) // short corpora: the sample may be shorter than ctx
 			loss := m.forward(s, tokens)
+			if math.IsNaN(float64(loss)) {
+				fmt.Println("[train] NaN loss - aborting")
+				os.Exit(1)
+			}
 			m.backward(s, tokens)
+			// gradient clipping (per-layer max norm 1.0): one exploding
+			// sample (long file tails, rare tokens) must not NaN the
+			// AdamW state - measured: stable ~11.96 then NaN on the last
+			// sample of epoch 1 without it.
 			for l = 0; l < m.NLayer; l++ {
 				layer := m.Layers[l]
-				layer.Q.adamStep(step)
-				layer.K.adamStep(step)
-				layer.V.adamStep(step)
-				layer.O.adamStep(step)
-				layer.Gate.adamStep(step)
-				layer.Up.adamStep(step)
-				layer.Down.adamStep(step)
+				clipGrads(layer.Q.dA, layer.Q.dB)
+				clipGrads(layer.K.dA, layer.K.dB)
+				clipGrads(layer.V.dA, layer.V.dB)
+				clipGrads(layer.O.dA, layer.O.dB)
+				clipGrads(layer.Gate.dA, layer.Gate.dB)
+				clipGrads(layer.Up.dA, layer.Up.dB)
+				clipGrads(layer.Down.dA, layer.Down.dB)
 			}
+			// each layer's LoRA update is independent: one parallel pass
+			// over the 28 layers instead of a sequential chain of 7*28 steps
+			parallel(m.NLayer, func(lo int, hi int) {
+				var l int = lo
+				for l = lo; l < hi; l++ {
+					layer := m.Layers[l]
+					layer.Q.adamStep(step)
+					layer.K.adamStep(step)
+					layer.V.adamStep(step)
+					layer.O.adamStep(step)
+					layer.Gate.adamStep(step)
+					layer.Up.adamStep(step)
+					layer.Down.adamStep(step)
+				}
+			})
 			tot += loss
 			if si%10 == 9 || si == len(samples)-1 {
 				fmt.Printf("[train] epoch %d/%d sample %d/%d loss %.4f (%.0fs)\n",

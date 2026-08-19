@@ -189,7 +189,7 @@ func collectCmd(args []string) {
 	}
 	fmt.Printf("[collect] domain=%s %d samples (ctx %d, stride %d)\n", domain, len(samples), ctx, stride)
 	c := loadSalience(domain, m)
-	scr := newScratch(ctx, m)
+	scr := newScratch(ctx, m, 1)
 	var t0 = time.Now().UnixMilli()
 	for si, s := range samples {
 		m.Col = c

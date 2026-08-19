@@ -27,6 +27,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -162,7 +164,10 @@ func autostartLang(cfg *serveConfig, lang string) string {
 	if lora != "" {
 		cmdArgs = append(cmdArgs, "--lora", lora)
 	}
-	cmdArgs = append(cmdArgs, "-t", "4", "-c", "4096", "--port", strconv.Itoa(port))
+	// -np 1: this llama.cpp build's auto default splits the 4096 ctx into
+	// 4 slots of ~1024 each, and a chained omp prompt (3400+ tokens) cannot
+	// fit one slot -> "Context size has been exceeded" -> empty replies.
+	cmdArgs = append(cmdArgs, "-t", "4", "-c", "4096", "-np", "1", "--port", strconv.Itoa(port))
 	cmd := exec.Command(serverBin, cmdArgs...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -195,7 +200,6 @@ type routePlan struct {
 	target         string
 	slmTag         string
 	servedLang     string
-	chained        bool
 	fwdBody        string
 	origPrompt     string
 	override       string // non-empty: answer directly, do not forward
@@ -239,6 +243,18 @@ func routeCompletion(cfg *serveConfig, req *completionReq) *routePlan {
 				r.overrideHeader = "delegated->" + pendingLang
 				return r
 			}
+			// no ready slice: promise to slice one (the oracle registered the
+			// language, the watcher may be mid-build; racing is harmless).
+			if langKnown(pendingLang) && spawnSliceBuild(pendingLang) {
+				appendTurn(turn{Session: req.Session, Ts: time.Now().UnixMilli(),
+					SLM: "slice-build", Lang: pendingLang, Tokens: 0, WallMs: 0,
+					ScopeEvent: "slicing->" + pendingLang})
+				r.override = fmt.Sprintf(
+					"slicing an SLM for %s now (gglora, ~20 min on the potato) - the watcher will publish it to the index.",
+					pendingLang)
+				r.overrideHeader = "slicing->" + pendingLang
+				return r
+			}
 		}
 	}
 
@@ -254,7 +270,23 @@ func routeCompletion(cfg *serveConfig, req *completionReq) *routePlan {
 	var semanticLang string = ""
 	var semanticMargin float64 = 0
 	var semanticLabel string = ""
-	if hits := resolveIndex(idxPath, routeText, 2); len(hits) > 0 {
+	// ---- the 2B decides the topic first --------------------------------
+	// User contract: every prompt goes to the general 2B SLM first; the
+	// inference then switches to the stack SLM the task is about. The 2B's
+	// classification is authoritative (no consent round-trip); the Go
+	// semantic/lexical protocol below is the fallback when the 2B says
+	// "general" or an unknown word.
+	var fromBrain bool = false
+	if routeText != "" {
+		if topic := routerBrain(cfg, routeText); topic != "" {
+			semanticLang = topic
+			semanticLabel = topic
+			fromBrain = true
+			fmt.Fprintf(os.Stderr, "[brain] session=%s topic=%s (2B decided)\n", req.Session, topic)
+		}
+	}
+	if !fromBrain {
+		if hits := resolveIndex(idxPath, routeText, 2); len(hits) > 0 {
 		top := hits[0]
 		if len(hits) > 1 && hits[1].Score > 0 {
 			semanticMargin = top.Score / hits[1].Score
@@ -264,6 +296,7 @@ func routeCompletion(cfg *serveConfig, req *completionReq) *routePlan {
 		if semanticMargin >= 2.0 {
 			semanticLang = top.Lang
 			semanticLabel = top.Label
+		}
 		}
 	}
 	// lexical scope signal: when the index has no opinion but the prompt
@@ -275,8 +308,10 @@ func routeCompletion(cfg *serveConfig, req *completionReq) *routePlan {
 		var lexConf float64 = 0
 		lexLang, lexConf, lexHits = detectLanguageN(routeText, "")
 		_ = lexConf
-		// trust the lexical signal only on >= 2 distinct pattern hits
-		if lexHits < 2 || lexLang == "default" {
+		// trust the lexical signal only on >= 2 distinct pattern hits AND
+		// only when the stack actually owns that SLM (manifest-aware: the
+		// fallback must not reach past the stack's own slices).
+		if lexHits < 2 || lexLang == "default" || !manifestHas(lexLang) {
 			lexLang = ""
 		}
 	}
@@ -294,30 +329,43 @@ func routeCompletion(cfg *serveConfig, req *completionReq) *routePlan {
 		req.Session, ownerLang, semanticLang, semanticLabel, lexLang, lexHits, scopeLang,
 		looksLikeCode(routeText))
 
-	// branch 1: out-of-scope vs the session owner -> ask the user
+	// branch 1: out-of-scope vs the session owner -> switch (2B decision)
+	// or ask the user (index decision)
 	if ownerLang != "" && scopeLang != "" && scopeLang != ownerLang {
-		msg := fmt.Sprintf(
-			"destination hit out of scope - shall we delegate an SLM for %s (%s)?",
-			scopeLabel, scopeLang)
-		appendTurn(turn{Session: req.Session, Ts: time.Now().UnixMilli(),
-			SLM: "none", Lang: ownerLang, Tokens: 0, WallMs: 0,
-			ScopeEvent: "out-of-scope->" + semanticLang, Escalation: msg,
-			Pending: semanticLang})
-		r.override = msg
-		r.overrideHeader = "out-of-scope->" + semanticLang
-		return r
+		if fromBrain {
+			// the 2B decided: adopt the new owner and route (no consent)
+			appendTurn(turn{Session: req.Session, Ts: time.Now().UnixMilli(),
+				SLM: "brain-switch", Lang: scopeLang, Tokens: 0, WallMs: 0,
+				ScopeEvent: "brain-switch->" + scopeLang})
+		} else {
+			msg := fmt.Sprintf(
+				"destination hit out of scope - shall we delegate an SLM for %s (%s)?",
+				scopeLabel, scopeLang)
+			appendTurn(turn{Session: req.Session, Ts: time.Now().UnixMilli(),
+				SLM: "none", Lang: ownerLang, Tokens: 0, WallMs: 0,
+				ScopeEvent: "out-of-scope->" + semanticLang, Escalation: msg,
+				Pending: semanticLang})
+			r.override = msg
+			r.overrideHeader = "out-of-scope->" + semanticLang
+			return r
+		}
 	}
 
-	// branch 2: the hit's language has no backend -> ask for a slice
+	// branch 2: the hit's language has no backend -> start it (2B
+	// decision) or ask for a slice (index decision)
 	var target string = ""
 	if scopeLang != "" {
 		if hasBackend(cfg, scopeLang) {
 			target = cfg.backends[scopeLang]
-		} else {
+		} else if fromBrain {
+			// the 2B already decided: start the ready expert without asking
+			target = autostartLang(cfg, scopeLang)
+		}
+		if target == "" {
 			msg := fmt.Sprintf(
-				"no %s slice is running yet - add a %s element to the stack "+
-					"(or say yes and I will start one) so the watcher can slice it.",
-				scopeLang, scopeLang)
+				"no %s slice is running yet - say yes and I will slice an SLM for %s "+
+					"(or add a %s element to the stack so the watcher picks it up).",
+				scopeLang, scopeLang, scopeLang)
 			appendTurn(turn{Session: req.Session, Ts: time.Now().UnixMilli(),
 				SLM: "none", Lang: ownerLang, Tokens: 0, WallMs: 0,
 				ScopeEvent: "missing-slice->" + scopeLang, Escalation: msg,
@@ -336,25 +384,20 @@ func routeCompletion(cfg *serveConfig, req *completionReq) *routePlan {
 		}
 	}
 
-	// ---- context chaining: approach the cap -> summarize + fresh context
-	var chainCap int = defaultChainCap
-	if req.ChainCap > 0 {
-		chainCap = req.ChainCap
+	// ---- context guard: no chaining (removed - it cost minutes per turn
+	// and rebuilt from client transcripts anyway), no silent truncation.
+	// When the session no longer fits the backend window, the client gets
+	// a machine-detectable exhausted response and restarts the context
+	// from its summary cache; the segstore rehydrates past summaries.
+	if estTokens(req.Prompt) > backendWindow {
+		r.override = "[context exhausted] the session no longer fits the SLM window - restart the context from the summary cache"
+		r.overrideHeader = "context-exhausted"
+		return r
 	}
-	prefix, chained := chainContext(cfg, req.Session, req.Prompt, chainCap)
 	var fwdBody string = ""
 	{
 		rawBody, _ := json.Marshal(req)
 		fwdBody = string(rawBody)
-	}
-	if chained {
-		fwdBody = fmt.Sprintf(`{"prompt":%s,"n_predict":%d,"cache_prompt":false}`,
-			jsonString(prefix+"\n\n"+req.Prompt), req.NPredict)
-		appendTurn(turn{Session: req.Session, Ts: time.Now().UnixMilli(),
-			SLM: "summarizer", Lang: "", Tokens: 0, WallMs: 0,
-			ScopeEvent: "context-chain", Escalation: "chained at cap"})
-		fmt.Fprintf(os.Stderr, "[gateway] session %s: context chained (cap %d)\n",
-			req.Session, chainCap)
 	}
 
 	// ---- language bridge: translate the prompt for the SLM -----------
@@ -455,16 +498,15 @@ func serveHandler(cfg *serveConfig) http.HandlerFunc {
 		defer resp.Body.Close()
 		if strings.Contains(plan.fwdBody, "\"stream\":true") ||
 			strings.Contains(plan.fwdBody, "\"stream\": true") {
-			streamRelay(w, resp, &req, plan.target, plan.slmTag, plan.chained, t0, plan.servedLang)
+			streamRelay(w, resp, &req, plan.target, plan.slmTag, t0, plan.servedLang)
 			return
 		}
 		out, _ := io.ReadAll(resp.Body)
 
-		// ledger + archive + chain marker BEFORE writing, so headers and the
-		// chained content prefix actually reach the client.
+		// ledger + archive BEFORE writing, so headers and content reach
+		// the client.
 		var cr completionResp
 		var tokens int = 0
-		var promptTokens int = 0
 		if json.Unmarshal(out, &cr) == nil && cr.Content != "" {
 			_ = json.Unmarshal(out, &struct{ Content *string }{})
 		}
@@ -476,7 +518,6 @@ func serveHandler(cfg *serveConfig) http.HandlerFunc {
 		}
 		_ = json.Unmarshal(out, &respTimings)
 		tokens = respTimings.Timings.PredictedN
-		promptTokens = respTimings.Timings.PromptN
 		appendTurn(turn{Session: req.Session, Ts: time.Now().UnixMilli(),
 			SLM: "backend(" + plan.target + ")", Lang: plan.servedLang,
 			Tokens: tokens, WallMs: time.Since(t0).Milliseconds()})
@@ -497,31 +538,18 @@ func serveHandler(cfg *serveConfig) http.HandlerFunc {
 				w.Header().Set("X-Gotato-Bridge", "zh")
 			}
 			appendContent(req.Session, "assistant", cr2.Content)
-			if plan.chained {
-				cr2.Content = "[context chained - summary prepended to next turn]\n" + cr2.Content
-				chainedOut, _ := json.Marshal(cr2)
-				out = chainedOut
-				w.Header().Set("X-Gotato-Chain", "true")
-			}
-		}
-		if promptTokens > 0 {
-			addPosition(req.Session, promptTokens+tokens)
-		} else {
-			addPosition(req.Session, estTokens(req.Prompt)+tokens)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Gotato-Backend", plan.target)
 		w.Header().Set("X-Gotato-SLM", plan.slmTag)
-		if plan.chained {
-			w.Header().Set("X-Gotato-Chain", "true")
-		}
 		_, _ = w.Write(out)
 	}
 }
 
 func serveCmd(args []string) {
 	cfg := defaultServeConfig()
+	verifyURL = cfg.backends["general"] // the 2B verifies the tool-executor's writes
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--addr" && i+1 < len(args) {
 			cfg.addr = args[i+1]
@@ -536,6 +564,7 @@ func serveCmd(args []string) {
 	mux.HandleFunc("/slms", slmsHandler(cfg))
 	mux.HandleFunc("/v1/chat/completions", chatHandler(cfg))
 	mux.HandleFunc("/v1/models", modelsHandler(cfg))
+	mux.HandleFunc("/manifest", manifestHandler)
 	mux.HandleFunc("/memstats", memstatsHandler(cfg))
 	segCacheInit() // the reserved summary-RAM cap (GOTATO_SUMMARY_CACHE_MB)
 	warmState() // one cold ledger read; the hot state is RAM-only afterwards
@@ -602,12 +631,6 @@ func slmsHandler(cfg *serveConfig) http.HandlerFunc {
 		}
 		_ = activeLang // carried for symmetry; the TUI keys on the name
 		uses := ledgerUsesByTarget()
-		langs := make([]string, 0, len(backends))
-		for lang := range backends {
-			langs = append(langs, lang)
-		}
-		sort.Strings(langs)
-
 		type slmEntry struct {
 			Name   string `json:"name"`
 			Lang   string `json:"lang"`
@@ -616,9 +639,26 @@ func slmsHandler(cfg *serveConfig) http.HandlerFunc {
 			Uses   int    `json:"uses"`
 			Used   bool   `json:"used"`
 		}
-		roster := make([]slmEntry, 0, len(langs))
-		for _, lang := range langs {
-			url := backends[lang]
+		// ---- manifest-aware roster ----------------------------------
+		// omp-potato's SLM bar shows ONLY this stack's own slices (the
+		// per-stack manifest) plus the generalists every prompt consults
+		// first (the 2B brain) and the 4B hard fallback. Slices from other
+		// stacks (gdscript-slice, rust-slice, ...) never appear.
+		var rosterLangs []string = stackManifestLangs()
+		roster := make([]slmEntry, 0, len(rosterLangs)+2)
+		if gen, ok := backends["general"]; ok {
+			roster = append(roster, slmEntry{Name: "2b-general", Lang: "general",
+				Port: backendPort(gen), Target: gen, Uses: uses[gen], Used: uses[gen] > 0})
+		}
+		if hard, ok := backends["hard"]; ok {
+			roster = append(roster, slmEntry{Name: "4b-general", Lang: "hard",
+				Port: backendPort(hard), Target: hard, Uses: uses[hard], Used: uses[hard] > 0})
+		}
+		for _, lang := range rosterLangs {
+			var url string = ""
+			if b, ok := backends[lang]; ok && hasBackend(cfg, lang) {
+				url = b
+			}
 			roster = append(roster, slmEntry{
 				Name:   slmBaseName(url, lang),
 				Lang:   lang,
@@ -710,6 +750,94 @@ func partialCallHold(tail string) int {
 	return -1
 }
 
+// routerBrain: the general 2B decides the task's topic first (the user
+// contract: every prompt consults the 2B, then the inference switches to
+// the stack SLM the task is about). Deterministic: temperature 0, tiny
+// budget, thinking disabled via chat_template_kwargs (the Qwen3.5 base
+// otherwise burns its whole budget on <think>). The candidate list is the
+// CURRENT STACK's SLMs (the per-stack manifest, falling back to the
+// catalogue), so the 2B only ever picks a slice this stack owns. The
+// answer is matched against the candidates word-boundary; "general" or
+// an unknown word returns "" and the Go index/lexical protocol takes
+// over (the 2B may still miss - the fallback is the safety net).
+func routerBrain(cfg *serveConfig, text string) string {
+	var url string = cfg.backends["general"]
+	if url == "" {
+		return ""
+	}
+	var known []string = stackManifestLangs()
+	var head string = text
+	if len(head) > 600 {
+		head = head[:600]
+	}
+	var prompt string = fmt.Sprintf(
+		"Classify the programming language of this task (%s, or general).\nTask: %s\nLanguage: ",
+		strings.Join(known, ", "), head)
+	body, _ := json.Marshal(map[string]any{
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt}},
+		"max_tokens": 24, "temperature": 0,
+		"chat_template_kwargs": map[string]any{"enable_thinking": false}})
+	resp, err := httpPostJSONSlow(url+"/v1/chat/completions", body)
+	if err != nil {
+		return ""
+	}
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(resp, &out) != nil || len(out.Choices) == 0 {
+		return ""
+	}
+	var lower string = strings.ToLower(out.Choices[0].Message.Content)
+	for _, name := range known {
+		if regexp.MustCompile(`\b`+regexp.QuoteMeta(name)+`\b`).MatchString(lower) {
+			return name
+		}
+	}
+	return ""
+}
+
+// manifestHas: does the current stack's manifest own an SLM for lang?
+// Without a manifest, the catalogue is the authority (any catalogued
+// language is sliceable for the stack on demand).
+func manifestHas(lang string) bool {
+	var langs map[string]*stackLangEntry = stackManifest()
+	if langs == nil {
+		return langKnown(lang)
+	}
+	_, ok := langs[lang]
+	return ok
+}
+
+// stackManifestLangs: the language keys of the CURRENT stack's manifest
+// (the gateway's cwd IS the stack), falling back to the catalogue when no
+// manifest exists yet. The 2B only picks from these.
+func stackManifestLangs() []string {
+	var names map[string]bool = make(map[string]bool)
+	if langs := stackManifest(); langs != nil {
+		for name := range langs {
+			names[name] = true
+		}
+	}
+	if len(names) == 0 {
+		for name := range langCatalog {
+			if name != "summarizer" {
+				names[name] = true
+			}
+		}
+	}
+	var out []string = make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // toolBrain: the instruct 1.7B slice that drives the tool loop (the proven
 // cowork model); falls back to the generalist if it is not registered.
 func toolBrain(cfg *serveConfig) string {
@@ -719,17 +847,6 @@ func toolBrain(cfg *serveConfig) string {
 		return b
 	}
 	return cfg.backends["general"]
-}
-
-// chatChainCap: the compaction trigger for chat sessions. 3600 (~88% of the
-// backend's 4096 window) once the dedicated summarizer slice is ready;
-// 12000 while the 2B fallback would make every compaction a 1-2min stall.
-func chatChainCap() int {
-	idx := loadIndex()
-	if e, ok := idx["summarizer"]; ok && e.Status == "ready" {
-		return 3600
-	}
-	return 12000
 }
 
 func memstatsHandler(cfg *serveConfig) http.HandlerFunc {
@@ -885,10 +1002,16 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		// the recent turns + the assistant opener the SLM must continue);
 		// the router still scopes on the full last user message.
 		prompt := strings.TrimSpace(sb.String())
-		const maxPromptChars = 3400 * 4 // ~3400 tokens: safety margin under the -c 4096 window
-		if len(prompt) > maxPromptChars {
-			prompt = "[gateway: earlier context truncated to fit the 4k window]\n" +
-				prompt[len(prompt)-maxPromptChars:]
+		// no chaining, no silent truncation: when the transcript no longer
+		// fits the backend window, signal the client (omp restarts the
+		// context from its summary cache; retrieveSegments below rehydrates
+		// past summaries on demand).
+		if estTokens(prompt) > backendWindow {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Gotato-Context-Exhausted", "1")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_, _ = w.Write([]byte(`{"error":{"message":"context exhausted","code":"GOTATO_CONTEXT_EXHAUSTED","hint":"restart the context with a summary cache and resend"}}`))
+			return
 		}
 		// summary-store retrieval: if the current request matches a past
 		// segment's preview, rehydrate its full summary (RAM or gz) so a
@@ -900,11 +1023,7 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 			}
 		}
 		req := completionReq{Prompt: prompt, NPredict: nPredict,
-			Session: session, RoutePrompt: lastUser, Stream: creq.Stream, SkipBridge: true,
-			// chat sessions: the window is bounded by truncation anyway, so
-			// chaining is only worth its 2B summarizer cost for LONG histories
-			// (~12K positions = dozens of potato turns). Per-request override.
-			ChainCap: chatChainCap()}
+			Session: session, RoutePrompt: lastUser, Stream: creq.Stream, SkipBridge: true}
 		plan := routeCompletion(cfg, &req)
 		if plan.override != "" {
 			// escalation / delegation text arrives as a normal assistant reply
@@ -925,7 +1044,7 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		w.Header().Set("X-Gotato-SLM", plan.slmTag)
 		if strings.Contains(plan.fwdBody, "\"stream\":true") ||
 			strings.Contains(plan.fwdBody, "\"stream\": true") {
-			streamRelayChat(cfg, w, resp, &req, plan.target, plan.slmTag, plan.chained, t0, plan.servedLang)
+			streamRelayChat(cfg, w, resp, &req, plan.target, plan.slmTag, t0, plan.servedLang)
 			return
 		}
 		out, _ := io.ReadAll(resp.Body)
@@ -949,11 +1068,17 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 			content = translateToEN(cfg, content)
 		}
 		// tool loop (non-stream): the routed SLM asked for tools -> run the
-		// instruct-brain loop and answer with the final result.
+		// instruct-brain loop and answer with the final result. The tool
+		// transcript rides in the reply so the user SEES what was executed.
 		if m := toolCallRe.FindStringSubmatch(cr.Content); m != nil {
 			var final string
-			final, _ = coworkTurn(toolBrain(cfg), session, lastUser, false)
-			content = "\n[executed tool calls]\n" + final
+			var transcript string
+			final, transcript = coworkTurn(toolBrain(cfg), session, lastUser, false)
+			var tb strings.Builder
+			tb.WriteString("\n[executed tool calls]\n")
+			tb.WriteString(transcript)
+			tb.WriteString(final)
+			content = tb.String()
 		}
 		if stripped := stripThink(content); stripped != "" {
 			content = stripped // a fully-think reply stays visible: an empty
@@ -961,11 +1086,6 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		}
 		if content != "" {
 			appendContent(req.Session, "assistant", content)
-		}
-		if promptTokens > 0 {
-			addPosition(req.Session, promptTokens+tokens)
-		} else {
-			addPosition(req.Session, estTokens(req.Prompt)+tokens)
 		}
 		writeChatCompletion(w, content, plan.slmTag, promptTokens, tokens)
 	}
@@ -998,7 +1118,7 @@ func writeChatCompletion(w http.ResponseWriter, content string, model string, pr
 // backend stream would stall OpenAI clients (omp aborts after ~15s with
 // zero bytes).
 func streamRelayChat(cfg *serveConfig, w http.ResponseWriter, resp *http.Response, req *completionReq,
-	target string, slmTag string, chained bool, t0 time.Time, servedLang string) {
+	target string, slmTag string, t0 time.Time, servedLang string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Gotato-Backend", target)
@@ -1188,6 +1308,13 @@ func streamRelayChat(cfg *serveConfig, w http.ResponseWriter, resp *http.Respons
 		var marker string = fmt.Sprintf("\n[executed %d tool call(s)]\n", n)
 		content.WriteString(marker)
 		emitContentDelta(marker)
+		// the transcript is streamed too: omp sees what the tools did
+		// (list_dir/read_file/run_command + the result sizes) before the
+		// final answer.
+		if transcript != "" {
+			emitContentDelta(transcript)
+			content.WriteString(transcript)
+		}
 		content.WriteString(final)
 		emitContentDelta(final)
 		if transcript != "" {
@@ -1214,38 +1341,50 @@ func streamRelayChat(cfg *serveConfig, w http.ResponseWriter, resp *http.Respons
 	if content.Len() > 0 {
 		appendContent(req.Session, "assistant", content.String())
 	}
-	if promptTokens > 0 {
-		addPosition(req.Session, promptTokens+tokens)
-	} else {
-		addPosition(req.Session, estTokens(req.Prompt)+tokens)
-	}
 }
 
 // modelsHandler: GET /v1/models - advertise the fleet to OpenAI-shaped
 // clients. Every roster member is listed plus the gateway alias.
+// stackManifest: read the CURRENT stack's per-stack SLM manifest (the
+// gateway's cwd IS the stack). Returns nil when missing. omp-potato
+// reads it via GET /manifest to know which SLMs to launch.
+func stackManifest() map[string]*stackLangEntry {
+	var wd string
+	var err error
+	wd, err = os.Getwd()
+	if err != nil {
+		return nil
+	}
+	var base string = filepath.Base(strings.TrimRight(wd, "/"))
+	var path string = fleetDir + "/stacks/" + base + ".json"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var st struct {
+		Stack     string                     `json:"stack"`
+		Languages map[string]*stackLangEntry `json:"languages"`
+	}
+	if json.Unmarshal(data, &st) != nil {
+		return nil
+	}
+	return st.Languages
+}
+
 func modelsHandler(cfg *serveConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
 			http.NotFound(w, r)
 			return
 		}
-		cfg.mu.Lock()
-		backends := make(map[string]string, len(cfg.backends))
-		for k, v := range cfg.backends {
-			backends[k] = v
-		}
-		cfg.mu.Unlock()
-		langs := make([]string, 0, len(backends))
-		for lang := range backends {
-			langs = append(langs, lang)
-		}
-		sort.Strings(langs)
+		// omp-potato sees ONLY this stack's SLMs (manifest-aware): the
+		// model list IS the per-stack manifest's languages.
+		var langs []string = stackManifestLangs()
 		data := make([]map[string]any, 0, len(langs)+1)
 		for _, lang := range langs {
-			url := backends[lang]
 			data = append(data, map[string]any{
-				"id":      slmBaseName(url, lang),
-				"object":  "model",
+				"id":       "slm-" + lang,
+				"object":   "model",
 				"owned_by": "gotatoqwen",
 			})
 		}
@@ -1253,6 +1392,32 @@ func modelsHandler(cfg *serveConfig) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
 	}
+}
+
+// manifestHandler: GET /manifest - the stack's SLM manifest with the full
+// launch recipes (base, lora, ctx, threads, window) so omp-potato can
+// start the stack's SLMs itself.
+func manifestHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet || r.URL.Path != "/manifest" {
+		http.NotFound(w, r)
+		return
+	}
+	var wd string
+	var err error
+	wd, err = os.Getwd()
+	if err != nil {
+		http.Error(w, `{"error":"no stack"}`, 500)
+		return
+	}
+	var base string = filepath.Base(strings.TrimRight(wd, "/"))
+	var path string = fleetDir + "/stacks/" + base + ".json"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		http.Error(w, `{"error":"no manifest for `+base+` - run expertd stacks `+wd+`"}`, 404)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
 }
 
 // slmBaseName: the stable SLM identity for a backend target (no topic
@@ -1299,14 +1464,11 @@ func slmDisplayTag(target string, lang string, label string, owner string) strin
 // content and recording the turn. Headers are set before the first flush so
 // the client sees the SLM tag before any token arrives.
 func streamRelay(w http.ResponseWriter, resp *http.Response, req *completionReq,
-	target string, slmTag string, chained bool, t0 time.Time, servedLang string) {
+	target string, slmTag string, t0 time.Time, servedLang string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Gotato-Backend", target)
 	w.Header().Set("X-Gotato-SLM", slmTag)
-	if chained {
-		w.Header().Set("X-Gotato-Chain", "true")
-	}
 	flusher, ok := w.(http.Flusher)
 	if ok {
 		flusher.Flush()
@@ -1329,7 +1491,6 @@ func streamRelay(w http.ResponseWriter, resp *http.Response, req *completionReq,
 	// parse the accumulated SSE for content + final timings
 	var content strings.Builder
 	var tokens int = 0
-	var promptTokens int = 0
 	sc := bufio.NewScanner(strings.NewReader(acc.String()))
 	sbuf := getScanBuf()
 	defer putScanBuf(sbuf)
@@ -1355,7 +1516,6 @@ func streamRelay(w http.ResponseWriter, resp *http.Response, req *completionReq,
 		}
 		if frame.Stop {
 			tokens = frame.Timings.PredictedN
-			promptTokens = frame.Timings.PromptN
 		}
 	}
 	appendTurn(turn{Session: req.Session, Ts: time.Now().UnixMilli(),
@@ -1364,10 +1524,5 @@ func streamRelay(w http.ResponseWriter, resp *http.Response, req *completionReq,
 	appendContent(req.Session, "user", req.Prompt)
 	if content.Len() > 0 {
 		appendContent(req.Session, "assistant", content.String())
-	}
-	if promptTokens > 0 {
-		addPosition(req.Session, promptTokens+tokens)
-	} else {
-		addPosition(req.Session, estTokens(req.Prompt)+tokens)
 	}
 }

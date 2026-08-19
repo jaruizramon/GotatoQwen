@@ -15,6 +15,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -67,11 +69,39 @@ func toolSchemas() []mcpTool {
 	}
 }
 
+// resolveStackPath: the SLM may hallucinate a path (e.g. "/project/AGENT.md"
+// or "/home/pipo/stack/x"). Deterministic safety net: try the path as-is;
+// if it does not exist and is not already under the stack root, retry it
+// joined onto the root (stripping any leading slash). Returns the original
+// path when neither exists, so error messages stay truthful.
+func resolveStackPath(p string) string {
+	if p == "" {
+		return getStackRoot()
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs // canonical key: the read guard, fidelity check and the
+		// write target must all agree on the same path for one file
+	}
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	root := getStackRoot()
+	if strings.HasPrefix(p, root) {
+		return p
+	}
+	candidate := root + "/" + strings.TrimLeft(p, "/")
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate
+	}
+	return p
+}
+
 func execTool(name string, args map[string]any, approve bool) (string, bool) {
 	var path string
 	if v, ok := args["path"].(string); ok {
 		path = v
 	}
+	path = resolveStackPath(path)
 	var cmd string
 	if v, ok := args["command"].(string); ok {
 		cmd = v
@@ -100,6 +130,28 @@ func execTool(name string, args map[string]any, approve bool) (string, bool) {
 			data = data[:20000]
 		}
 		return string(data), false
+	case "write_file":
+		if !approve {
+			return "error: write_file requires user approval", true
+		}
+		var content string
+		if v, ok := args["content"].(string); ok {
+			content = v
+		}
+		var target string = resolveStackPath(path)
+		// writes must land inside the stack root (relative or invented
+		// absolute paths are re-rooted; nothing escapes the stack)
+		root := getStackRoot()
+		if !strings.HasPrefix(target, root) {
+			target = root + "/" + strings.TrimLeft(target, "/")
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return "error: " + err.Error(), true
+		}
+		if err := os.WriteFile(target, []byte(content), 0644); err != nil {
+			return "error: " + err.Error(), true
+		}
+		return "wrote " + target + " (" + strconv.Itoa(len(content)) + " bytes)", false
 	case "run_command":
 		if !approve {
 			return "error: command requires user approval", true

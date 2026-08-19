@@ -1,248 +1,198 @@
-# AGENT.md — setup guide for LLM agents (and humans)
+# AGENT.md — setup guide for LLM agents (v2: the GoTorch era)
 
 > Point an agent at this file with: "Set up GotatoQwen following AGENT.md"
 
-This file tells an AI agent how to stand up GotatoQwen on a fresh machine,
-end to end, with verification checkpoints and known failure modes. Read it
-completely before running anything.
+Read it completely before running anything. This file is the contract: the
+agent sets up the machine, builds the fleet, slices a stack, and verifies.
 
-## What "setup" means
+## What this project is
 
-The repo provides a *fleet* (quantized Qwen SLMs), a *pipeline* (watcher →
-per-project LoRA experts), a *sub-index* (token n-grams → labeled sections →
-SLM delegation), a *router with session escalation*, and test harnesses.
-Setup = build the toolchain, fetch the models, build the Go core, run one
-expert end-to-end, and pass the test harness.
+A **fragmented LLM**: small SLMs that delegate to one another. Per-stack
+experts (base + LoRA, sliced in-session by the watcher), a 2B brain that
+routes every prompt, a 1.7B tool executor with a 2B verifier. No python
+anywhere. The Go core (expertd, ~3.4MB, GOGC=off) orchestrates; the trainer
+(gglora) is Go + hand-written AVX2 C kernels (cgo).
 
 ## 0. The path contract (IMPORTANT)
 
-All machine-specific paths are overridable via environment variables; a
+Every machine-specific path is overridable via environment variables; a
 fresh checkout requires **zero code edits**:
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `GOTATO_FLEET` | `/home/pipo/slm-fleet` | models, adapters, `index.json`, `sessions.jsonl`, `subindex.json` |
-| `GOTATO_LLAMA` | `/home/pipo/llama.cpp` | llama.cpp checkout (for `convert_lora_to_gguf.py`) |
-| `GOTATO_LLAMA_BIN` | `$GOTATO_LLAMA/build/bin` | llama.cpp binaries (llama-cli, llama-server, llama-quantize) |
-| `GOTATO_VENV_PY` | `/home/pipo/qwen-venv/bin/python` | the project venv's python |
+| `GOTATO_FLEET` | `$HOME/slm-fleet` | models, adapters, `index.json`, `languages.json`, `subindex.json`, `sessions/`, `stacks/` (per-stack SLM manifests) |
+| `GOTATO_LLAMA_BIN` | `$HOME/llama.cpp/build/bin` | llama.cpp binaries (llama-server) |
+| `GOTATO_GGLORA` | `<repo>/core/gglora/gglora` | the GoTorch trainer binary |
+| `GOTATO_ORACLE_URL` | unset | the Qwen3.8-27B endpoint (`http://host:port`); without it `expertd oracle` needs `--mock` |
+| `GOTATO_APPROVE` | unset | `1` lets the headless gateway approve `write_file`/`run_command` tool calls |
+| `GOTATO_EXPERD` | `<repo>/core/expertd/expertd` | the gateway binary (bench scripts) |
 
-Set them once, export them, and every component (Go core + Python pipeline +
-bench scripts) honors them. The Go core reads them in `applyEnv()` (core/
-expertd/main.go); the Python scripts read them via `os.environ.get(...)`.
+## 1. Prerequisites
 
-## 1. Prerequisites (detect, don't assume)
+`uname -a; nproc; free -h; gcc --version; go version`
+Required: cmake ≥ 3.24, g++ ≥ 11, gcc (the trainer's AVX2 kernels are cgo),
+Go ≥ 1.21, ≥ 20 GB free disk, ≥ 12 GB RAM (potato) / ≥ 40 GB (test box).
+AVX2+FMA required for the fast kernels (any Intel Haswell+ / AMD Zen+).
+Install: `sudo apt-get install -y cmake g++ make curl` (+ go from go.dev).
 
-```bash
-uname -a; nproc; free -h; df -h /; nvidia-smi 2>/dev/null | head -3
-cmake --version; g++ --version | head -1; go version; python3 --version
-```
-
-Required: cmake ≥ 3.24, g++ ≥ 11, Go ≥ 1.21, Python ≥ 3.10, ~20 GB free
-disk for the potato config (60 GB for the 40 GB config with the 27B), ≥ 12 GB
-RAM for the potato config (the 27B itself needs ≥ 24 GB).
-Install on Ubuntu/Debian: `sudo apt-get install -y cmake g++ make python3 python3-venv curl`
-(Go: https://go.dev/dl if missing.)
-
-## 2. Build llama.cpp (CPU; CUDA/Vulkan optional)
+## 2. Build
 
 ```bash
-git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$GOTATO_LLAMA"
-cmake -S "$GOTATO_LLAMA" -B "$GOTATO_LLAMA/build" -DCMAKE_BUILD_TYPE=Release \
-      -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_NATIVE=OFF
-cmake --build "$GOTATO_LLAMA/build" -j"$(nproc)" \
-      --target llama-cli llama-server llama-perplexity llama-quantize
-export GOTATO_LLAMA_BIN="$GOTATO_LLAMA/build/bin"
+git clone https://github.com/jaruizramon/GotatoQwen.git
+cd GotatoQwen
+cmake -S "$HOME/llama.cpp" -B "$HOME/llama.cpp/build" ... # or: bash bench/setup.sh
+(cd core/expertd && GOGC=off go build -o expertd .)
+(cd core/gglora && GOGC=off go build -o gglora .)   # cgo: gcc + AVX2/FMA
 ```
 
-**Verify**: `"$GOTATO_LLAMA_BIN/llama-cli" --help | head -3` exits 0.
-Note: on 4-core/8-thread CPUs use `-t 4` (hyperthreading hurts; measured
-16.5 tok/s at t=4 vs 10.8 at t=8 on an i7-7700HQ). The finetune tool
-(`llama-finetune`) is broken for this use (GGML_ASSERT in backward graph) —
-do not use it; use the Python LoRA trainer.
+**Verify**: `./expertd langs` prints the language catalog; `./gglora train 2>&1 | grep usage` prints usage. Discipline: `GOGC=off` is intentional (no GC); the expertd core uses zero `:=` declarations; stdlib only — **except** `core/gglora/gemm.c`, the AVX2 kernels (the whole point: Go 1.22 emits zero FMA instructions; the C kernels reach ~87 GF/s vs ~10 pure Go).
 
-## 3. Python venv
+## 3. The fleet (models)
 
 ```bash
-python3 -m venv "$HOME/gotato-venv"
-"$HOME/gotato-venv/bin/pip" install -q torch --index-url https://download.pytorch.org/whl/cpu
-"$HOME/gotato-venv/bin/pip" install -q transformers safetensors gguf huggingface_hub numpy
-export GOTATO_VENV_PY="$HOME/gotato-venv/bin/python"
+mkdir -p "$GOTATO_FLEET" && cd "$GOTATO_FLEET"
+hf download unsloth/Qwen3.5-2B-GGUF Qwen3.5-2B-Q4_K_M.gguf --local-dir .    # the brain
+hf download unsloth/Qwen3.5-4B-GGUF Qwen3.5-4B-Q4_K_M.gguf --local-dir .    # hard fallback
+hf download unsloth/Qwen3-0.6B-GGUF Qwen3-0.6B-Q8_0.gguf --local-dir .      # expert base
+hf download lm-kit/Qwen3-1.7B-Instruct-GGUF Qwen3-1.7B-Q4_K_M.gguf --local-dir .  # tool brain
+# 40GB box only - the ORACLE (real language analysis; also distillation):
+hf download unsloth/Qwen3.8-27B-GGUF Qwen3.8-27B-Q4_K_M.gguf --local-dir .
 ```
 
-**Verify**: `"$GOTATO_VENV_PY" -c "import torch, transformers, safetensors; print('ok')"`.
-PEP 668 ("externally managed environment") is expected on modern distros —
-always use the venv, never system pip.
-
-## 4. Fleet models (HF)
+## 4. The stack workflow (per stack element)
 
 ```bash
-mkdir -p "$GOTATO_FLEET"
-"$GOTATO_VENV_PY" -m pip install -q -U "huggingface_hub[hf_transfer]" 2>/dev/null || true
-export HF_HUB_ENABLE_HF_TRANSFER=1
-cd "$GOTATO_FLEET"
-hf download unsloth/Qwen3.5-2B-GGUF Qwen3.5-2B-Q4_K_M.gguf --local-dir .
-hf download unsloth/Qwen3.5-4B-GGUF Qwen3.5-4B-Q4_K_M.gguf --local-dir .
-hf download unsloth/Qwen3-0.6B-GGUF Qwen3-0.6B-Q8_0.gguf --local-dir .
-# training base (HF format, for the LoRA trainer):
-hf download Qwen/Qwen3-0.6B --include "*.json" "*.safetensors" "*.txt" --exclude "*index*"
+# 1) watch the stack: scans, and slices an SLM for every language found
+nohup expertd watch /path/to/your/stack > /tmp/watcher.log 2>&1 &
+
+# 2) unknown languages (no catalog entry) get analyzed by the ORACLE:
+#    - on the 40GB box: run the 27B and point GOTATO_ORACLE_URL at it
+#      (llama-server -m Qwen3.8-27B-Q4_K_M.gguf -c 4096 -np 1 --port 8091)
+#    - on the potato: expertd oracle /path/to/stack --mock   (same JSON contract)
+expertd oracle /path/to/your/stack
+
+# 3) the watcher then builds the new language's SLM automatically
+#    (gglora train, ~1-5 min small corpus / ~60 min 40KB corpus, lr 5e-5)
+#    every finished SLM lands in index.json AND the per-stack manifest:
+expertd stacks            # per-stack SLM collection (launch recipes)
 ```
 
-**Verify**: three .gguf files present; `du -sh "$GOTATO_FLEET"` ≥ 5 GB.
-On the 40 GB config also fetch the 27B: `hf download unsloth/Qwen3.8-27B-GGUF Qwen3.8-27B-Q4_K_M.gguf`
-(17 GB; needs ≥ 24 GB RAM to run).
+The catalog: `expertd langs`. Language detection, scanning, indexing and
+routing ALL read the catalog — a new language registered by the oracle is
+instantly sliceable, indexable, routable. (The 27B's weights cannot be
+carved into experts — measured: redundancy ≈ 0 across its 64 layers. The
+oracle contributes knowledge, not weights.)
 
-## 5. Go core
+## 5. The gateway (the delegation hub)
 
 ```bash
-cd core/expertd && go mod tidy && GOGC=off go build -o expertd .
-cd ../gglora && go mod tidy && GOGC=off go build -o gglora .
+# run it FROM the stack directory: the cwd IS the stack (tools + manifest)
+cd /path/to/your/stack && GOTATO_APPROVE=1 nohup expertd serve > /tmp/gateway.log 2>&1 &
+# backends (llama-server, -np 1 is MANDATORY - see gotcha 4):
+#   8082 2B generalist (the brain)  8083 4B   8086 1.7B tool brain
+#   expert slices autostart on 8084+ from index.json on demand
 ```
 
-**Verify**: `./expertd` prints usage with `scan|detect|watch|route|bench|index|resolve|sessions`.
-Discipline (do not "fix"): `GOGC=off` is intentional (no garbage collector);
-the code uses zero `:=` declarations; stdlib only — no new dependencies.
+Routing contract (every request):
+1. **The 2B brain classifies the topic first** (temperature 0, thinking
+   disabled via chat_template_kwargs) — only picks languages in the stack's
+   manifest.
+2. The inference **switches to that stack's SLM** (autostarted if needed,
+   no consent round-trip — the 2B's decision IS the delegation).
+3. If the 2B says "general", the Go index/lexical protocol takes over
+   (also manifest-aware).
+4. If the routed SLM emits `<tool_call>`, the **1.7B executor** runs the
+   tool loop (list_dir / read_file / write_file / run_command) and the
+   **2B verifier** checks the write before the answer ships.
 
-## 6. One expert end-to-end (the pipeline)
+Endpoints for omp-potato: `GET /v1/models` (only the stack's SLMs),
+`GET /manifest` (the launch recipes), `GET /slms` (the roster), plus
+OpenAI-shaped `/v1/chat/completions`.
 
-Create a demo stack (a small project with a couple of `.py` files, ≥ 80 bytes
-each), then:
+## 6. The tool loop (correctness machinery)
 
-```bash
-nohup ./expertd watch /path/to/stack > /tmp/watcher.log 2>&1 &
-# the watcher spawns the builder: collect corpus -> LoRA (torch, 2 threads) -> convert
-# first build takes ~5-6 min on a potato (0.6B base, 2 epochs, small corpus)
+- `write_file` is approval-gated (`GOTATO_APPROVE=1` headless) and writes
+  are confined to the stack root.
+- **Pre-write fidelity gate**: a write dropping >50% of the read content is
+  rejected BEFORE touching disk (fragments never land).
+- **Re-read blocking** + **honesty nudge** (an edit task ending without a
+  write gets pushed to write) + **2B verification** (the executor's write is
+  checked by a second SLM; a failed verdict loops back for repair).
+- The transcript rides in the reply: `[tool] ...`, `[reject] ...`,
+  `[verify] 2B: VERIFIED|NO ...`.
+
+## 7. The trainer (gglora)
+
 ```
-
-**Verify**: `cat "$GOTATO_FLEET/index.json"` shows
-`{"python": {"status": "ready", "lora": "adapters/python.gguf", ...}}`.
-If `status: "error"`, read `"$GOTATO_FLEET/build_python.log"` (the builder
-appends its full log there). If the watcher respawns failed builds, wait for
-the 300 s error backoff before investigating. The training base for a larger
-expert: `pipeline/train_lora.py --base-model unsloth/Qwen3.5-2B` (needs
-≥ 24 GB RAM; the potato's 15 GB can only train the 0.6B base).
-
-## 7. Sub-index + session ledger
-
-```bash
-./expertd index /path/to/stack        # -> "$GOTATO_FLEET/subindex.json"
-./expertd resolve <file|text>         # semantic hit -> {label, lang, score}
-./expertd sessions                    # which SLM owns which session
+gglora train --base <0.6B gguf> --corpus corpus/<lang>.txt --out adapters/<lang>.gguf \
+             --threads N --window 128 --name <lang>
 ```
-
-**Verify**: `resolve` on a code task prints a top hit with a language; a
-nonsense string prints `no hits -> tier-3: streamed LLM`.
-
-## 7.5 The gateway (the llama harness)
-
-`expertd serve` (default :8090) fronts the llama-servers and runs the scope
-protocol on EVERY request. Use the gateway instead of hitting llama-server
-directly - the raw server has no scope awareness.
-
-```bash
-curl http://localhost:8090/completion -d '{"prompt":"...", "n_predict":64, "session":"s1"}'
-```
-
-Behavior: in-scope -> forwarded to the owning SLM (X-Gotato-Backend header);
-out-of-scope vs session owner -> asks "shall we delegate an SLM for X?";
-no slice running -> asks "add a X element to the stack..."; user says
-"yes" -> gateway autostarts the slice's llama-server (expert adapter from
-index.json) on :8084+, adopts the session owner, and the next task hits it.
-Sessions ledger: `expertd sessions`. Backends config: serve.go
-defaultServeConfig() - the python expert is :8081, 2B :8082, 4B :8083.
-
-### Context chaining (automatic)
-
-The gateway chains contexts when a session approaches its cap (default 3072
-tokens, per-request override `"chain_cap": N`): it summarizes the archived
-history with the 2B SLM, seeds a fresh context with [summary + recent turns],
-and continues - nothing is lost (the full archive lives in
-`$GOTATO_FLEET/sessions/<id>.jsonl`, storage is cheap). Chained responses
-carry `X-Gotato-Chain: true` and a visible `[context chained...]` prefix;
-the ledger records `context-chain` events. This is orchestration-level, not
-a llama.cpp C patch - upstream's native answer is a lossy KV-cache shift.
-
-### The TUI harness (`expertd chat`)
-
-Interactive chat with live SLM visibility: while the backend streams, the
-status line shows `Thinking [python-expert · utils] 3.2s` with the SLM tag in
-reverse video; the answer prints under a footer with the tag + tok/s; the
-terminal bell rings when the delegated SLM switches. Topic suffixes come from
-the gateway's `X-Gotato-SLM` header (base · topic, e.g. `python-expert ·
-utils`, `rust-slice · rust`). Requires the gateway + at least one backend
-running. Streaming is SSE passthrough (`"stream": true`).
-
-### The language bridge (`--bridge zh`)
-
-English in → Chinese for the SLM → English back out. Determinism contract:
-(1) fixed layer (templates/messages) is table-driven; (2) free-form uses
-greedy (the gateway FORCES temperature:0 on every forward - without it
-llama-server's default sampling makes output random) plus a disk translation
-cache (`$GOTATO_FLEET/translations/zh/<hash>.txt`), so identical input is
-byte-identical output (verified); (3) code blocks (``` fences) are never
-translated. The translator is an INSTRUCT model (lm-kit/Qwen3-1.7B-Instruct
-Q4_K_M on :8086) via /v1/chat/completions with a hard system directive - base
-models narrate instead of translating. Warm slots break determinism:
-cache_prompt is always false (the chain feature rebuilds prefixes instead).
-
-### Cowork + MCP (`expertd chat --cowork [--mcp]`)
-
-The TUI's tool-use mode: the instruct 1.7B (:8086) gets a tool registry and
-emits `<tool_call>{"name":...,"arguments":{...}}</tool_call>`; the harness
-executes and feeds results back (ReAct loop, max 5 iterations). Tools:
-list_dir, read_file, run_command (approval env-gated: GOTATO_APPROVE=1).
-`--mcp` routes the tools through a REAL MCP server: `expertd mcp` speaks
-JSON-RPC 2.0 over stdio (initialize / notifications/initialized /
-tools/list / tools/call) and the client spawns the same binary. Honest
-limits: the 1.7B's tool fidelity is real but embellishes - faithfulness
-scales with model size (host a 4B+ instruct on the 40GB box for production).
+- Windowed attention (O(t·w)), parallel backward/adam, RoPE tables, AVX2
+  kernels (fwd ~36 GF/s, bwd ~87 GF/s single-thread on a 4-core potato).
+- `--window 0` = full attention (parity default); the builder uses 128.
+- Gradient clipping (max norm 1.0) + NaN abort are ON: a diverging run
+  exits 1 and publishes `error` (never a broken adapter). lr is 5e-5
+  (2e-4 diverged on a 46KB corpus).
+- `expertd build <lang> <stack>` is the full pipeline (collect → train →
+  publish index + stack manifest); `expertd watch` spawns it.
 
 ## 8. Test harness
 
 ```bash
-bash bench/testrun.sh     # servers on :8081-8083 + scoreboard + escalation demo
-bash bench/ab_test.sh     # the A/B: fleet vs (optionally) the 27B on tasks/*
+bash bench/testrun.sh        # servers + scoreboard + escalation demo
+bash bench/ab_test.sh        # the A/B: fleet vs the 27B on tasks/*
 ```
-
-**Verify**: scoreboard.tsv has per-task tok/s; the testrun demo prints
-`destination hit out of scope - shall we delegate an SLM for rust?` on the
-second turn. If servers fail to load, check `"$GOTATO_FLEET/testrun/server-*.log"`
-and RAM headroom (`free -h` — the 27B needs ≥ 24 GB).
+Verify: scoreboard.tsv has per-task tok/s; the demo prints the
+out-of-scope escalation. On the 40GB box the headline experiment:
+**does a per-stack expert beat a same-size generalist?** (`--base-model
+unsloth/Qwen3.5-2B` LoRA training needs ≥ 24 GB RAM — only possible there).
 
 ## 9. Known gotchas (each was hit and fixed — do not re-encounter)
 
-1. **`gguf` f16 tensors are IEEE half, not bf16** — the `u32<<16` trick is
-   bf16-only. `core/gglora/gguf.go` decodes correctly; do not "simplify" it.
-2. **GGUF metadata**: bool values are 1 byte; u8/i8 1 byte; u16/i16 2 bytes.
-3. **`llama-cli` one-shot** needs `-st` (single-turn); with a chat template
-   the default is interactive mode.
-4. **`pkill -f <pattern>` can kill your own shell** if the pattern appears in
-   the command line — use `pkill -x` for exact process names.
-5. **OOM**: always pass `-c 2048..4096` (default context is the model's full
-   262K and its KV cache alone can OOM a 15 GB box); the DeltaNet state costs
-   ~2.4 GB fixed regardless of context.
-6. **`llama-quantize` refuses Q8→F16** without `--allow-requantize`.
-7. **numpy ≥ 2.3 removed float8 dtypes** — the FP8 analysis tools decode
-   E4M3 manually (`pipeline/../core` tooling); do not rely on numpy for FP8.
-8. **LoRA parity is verified** (core/gglora vs torch, bit-exact) — if you
-   change the math, re-run the dump-and-compare harness against torch.
-9. **The 27B's weights contain no separable experts** (redundancy ≈ 0 across
-   64 layers) — "slicing" means training small models from its *output*, not
-   carving its weights. This is a design fact, not a TODO.
+1. **`pkill -f <pattern>` can kill your own shell** if the pattern appears
+   in your command line — use `pkill -x` for exact process names.
+2. **`-np 1` on every llama-server** — this llama.cpp build's auto default
+   splits the 4096 ctx into 4 slots of ~1024 and every chained/omp prompt
+   dies with "Context size has been exceeded".
+3. **cgo's CFLAGS whitelist rejects `-mfma`** — the AVX2 kernels use
+   `__attribute__((target("avx2,fma")))` instead; do not add -m flags.
+4. **Qwen3-family models think in `reasoning_content`** — the tool loop
+   parses BOTH content and reasoning; the brain disables thinking via
+   `chat_template_kwargs: {enable_thinking: false}` (the 2B base cannot
+   classify without it; with it, use fill-in-the-blank prompts).
+5. **The 1.7B embellishes** — it claims edits it never made and writes
+   fragments. The guards (pre-write gate, honesty nudge, 2B verifier) are
+   the fix, not prompt tweaks. Production: 4B+ instruct as the tool brain.
+6. **Go does not auto-vectorize** (0 FMA emitted even with GOAMD64=v3).
+   The C kernels exist for this; never "simplify" gemm.c back to Go loops.
+7. **LoRA divergence** — big corpora NaN at lr 2e-4; lr 5e-5 + clipping.
+   A NaN abort means the build failed SAFELY; check build_<lang>.log.
+8. **The 27B needs ≥ 24 GB RAM and `-c 4096`** (its DeltaNet state costs
+   ~2.4 GB fixed). On 15 GB machines it OOMs — the oracle is mock-only
+   there.
+9. **The gateway's cwd is the stack** — start it from the stack dir; the
+   tools, the manifest and the model list all resolve from cwd.
+10. **Watcher vs manual builds race harmlessly** — the builder re-checks
+    index.json before publishing (atomic tmp+rename).
 
 ## 10. Machine profiles
 
-| | potato (12-16 GB) | test box (40 GB) |
+| | potato (12-16 GB) | test box (40 GB, 32 threads) |
 |---|---|---|
-| Fleet | 2B + 4B + 0.6B-expert | same |
-| 27B Q4 | ❌ (OOM) | ✅ ~2-3 tok/s, `-c 4096`, use `llama-server` |
+| Fleet | 2B + 4B + 0.6B experts | same |
+| 27B oracle | ❌ (OOM) | ✅ `-c 4096 -np 1`, GOTATO_ORACLE_URL |
 | 2B-base LoRA | ❌ (needs 24 GB) | ✅ `--base-model unsloth/Qwen3.5-2B` |
-| Distillation | ❌ | ✅ `bench/distill.py` (27B as oracle, ~2 tok/s) |
-| GPU (if NVIDIA ≥ 4 GB) | torch 2.3.1+cu121 for fp16 0.6B LoRA (7× faster; pin torch ≤ 2.4 for Maxwell sm_50) | check `nvidia-smi`; MX550-class runs 2B-base |
+| Tool brain | 1.7B (guards compensate) | 4B+ instruct (recommended) |
+| Threads | `-t 4` (hyperthreading hurts) | `-t 8..16` |
 
 ## 11. Definition of done
 
 ```bash
-bash bench/testrun.sh 2>&1 | grep -E "out of scope"   # escalation fires
-cat "$GOTATO_FLEET/index.json" | grep '"ready"'       # expert built
-cat "$GOTATO_FLEET/testrun/scoreboard.tsv"            # numbers > 0
+expertd langs                       # catalog lists the stack's languages
+expertd stacks                      # per-stack manifests exist (launch recipes)
+cat "$GOTATO_FLEET/index.json" | grep '"ready"'    # experts built
+curl localhost:8090/manifest        # omp-potato's launch config
+curl localhost:8090/v1/models       # the stack's SLMs only
+# and the delegation demo: "change X in <stack>" -> 2B brain -> stack SLM
+# -> 1.7B tools (transcript visible) -> 2B verifier -> file actually changed
 ```

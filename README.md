@@ -53,33 +53,34 @@ Also pending: the 27B as a local distillation oracle for the "extend" loop.
 
 ## Layout
 
-- `pipeline/` — watcher, builder, manual-LoRA trainer (torch, no peft),
-  router (Python reference implementation)
-- `core/` — `expertd`: the deterministic Go core (scan / detect / watch /
-  route / bench) — no GC, no `:=`, stdlib only
-- `bench/` — the 40 GB test bundle: setup, probe, A/B scoreboard,
-  distillation script, task set
+- `core/expertd` — the deterministic Go core (scan / detect / watch /
+  build / oracle / langs / stacks / serve) — no GC, no `:=`, stdlib only
+- `core/gglora` — the GoTorch trainer: Go orchestration + hand-written
+  AVX2 C kernels (cgo), windowed attention, gradient clipping, NaN abort
+- `bench/` — the 40 GB test bundle: setup, probe, A/B scoreboard, task set
+- `omp-potato/` — the thin-client fork config (prompt + launcher)
 
 ## Quickstart (potato)
 
 ```bash
-# fleet
-hf download unsloth/Qwen3.5-2B-GGUF Qwen3.5-2B-Q4_K_M.gguf
-hf download unsloth/Qwen3.5-4B-GGUF Qwen3.5-4B-Q4_K_M.gguf
 (cd core/expertd && go build -o expertd .)
-./expertd watch /path/to/your/stack        # daemon: watches, builds experts
-./expertd route /path/to/task.py -n 120    # detect -> index -> llama-cli --lora
+(cd core/gglora && go build -o gglora .)   # needs gcc + AVX2/FMA
+./expertd watch /path/to/your/stack        # daemon: watches, slices experts
+./expertd oracle /path/to/your/stack       # 27B analyzes unknown languages
+cd /path/to/your/stack && expertd serve    # the gateway (omp-potato connects)
 ```
 
-## On the 40 GB machine
+## On the 40 GB machine (the ThinkPad)
 
 ```bash
-bash bench/setup.sh && bash bench/probe.sh && bash bench/ab_test.sh
-# then, to make experts real:
-python3 bench/distill.py --lang python --tasks bench/tasks/python.txt --n 8 \
-    --corpus-out corpus/python.txt
-python3 pipeline/train_lora.py --corpus corpus/python.txt \
-    --out adapters/python --base-model unsloth/Qwen3.5-2B
+bash bench/setup.sh                         # deps + llama.cpp + fleet + Go core
+bash bench/testrun.sh                       # servers + scoreboard + demo
+# the 27B as the REAL oracle (real language analysis instead of --mock):
+llama-server -m Qwen3.8-27B-Q4_K_M.gguf -c 4096 -np 1 --port 8091 &
+GOTATO_ORACLE_URL=http://localhost:8091 expertd oracle /path/to/your/stack
+# the headline experiment - does a per-stack expert beat a same-size
+# generalist? (2B-base LoRA, needs >= 24 GB):
+bash bench/ab_test.sh
 ```
 
 ## License
