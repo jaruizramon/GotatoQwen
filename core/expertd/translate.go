@@ -33,7 +33,7 @@ var zhTemplates map[string]string = map[string]string{
 }
 
 func zhTemplate(key string, args ...string) string {
-	t, ok := zhTemplates[key]
+	var t, ok = zhTemplates[key]
 	if !ok || !bridgeZH {
 		return ""
 	}
@@ -50,8 +50,8 @@ func zhTemplate(key string, args ...string) string {
 
 // ---- code-block splitter --------------------------------------------------
 type seg struct {
-	code  bool
-	text  string
+	code bool
+	text string
 }
 
 // splitBlocks: split text on ``` fences, marking code segments.
@@ -59,8 +59,10 @@ func splitBlocks(text string) []seg {
 	var out []seg
 	var cur strings.Builder
 	var inCode bool = false
-	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
+	var line string
+
+	for _, line = range strings.Split(text, "\n") {
+		var trimmed = strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") {
 			if cur.Len() > 0 {
 				out = append(out, seg{code: inCode, text: cur.String()})
@@ -83,7 +85,7 @@ func cachePath(hash string) string {
 }
 
 func cacheGet(hash string) (string, bool) {
-	data, err := os.ReadFile(cachePath(hash))
+	var data, err = os.ReadFile(cachePath(hash))
 	if err != nil {
 		return "", false
 	}
@@ -91,7 +93,7 @@ func cacheGet(hash string) (string, bool) {
 }
 
 func cachePut(hash string, text string) {
-	dir := filepath.Dir(cachePath(hash))
+	var dir = filepath.Dir(cachePath(hash))
 	if os.MkdirAll(dir, 0755) != nil {
 		return
 	}
@@ -99,7 +101,7 @@ func cachePut(hash string, text string) {
 }
 
 func contentHash(s string) string {
-	h := sha256.Sum256([]byte(s))
+	var h = sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])[:24]
 }
 
@@ -109,7 +111,7 @@ func contentHash(s string) string {
 // Uses /v1/chat/completions with a hard system directive and enough budget
 // for the model to finish any thinking before the content field.
 func translateVia(cfg *serveConfig, direction string, text string) string {
-	backend := cfg.backends["translator"]
+	var backend = cfg.backends["translator"]
 	if backend == "" {
 		return ""
 	}
@@ -123,13 +125,15 @@ func translateVia(cfg *serveConfig, direction string, text string) string {
 			"text into natural English. Respond with ONLY the English translation. " +
 			"No explanation. No thinking."
 	}
-	body, _ := json.Marshal(map[string]any{
+	var body []byte
+
+	body, _ = json.Marshal(map[string]any{
 		"messages": []map[string]string{
 			{"role": "system", "content": directive},
 			{"role": "user", "content": text},
 		},
 		"temperature": 0, "max_tokens": 400})
-	resp, err := httpPostJSON(backend+"/v1/chat/completions", body)
+	var resp, err = httpPostJSON(backend+"/v1/chat/completions", body)
 	if err != nil {
 		return ""
 	}
@@ -148,11 +152,12 @@ func translateVia(cfg *serveConfig, direction string, text string) string {
 
 // translateProseCached: deterministic (cache-first) prose translation.
 func translateProseCached(cfg *serveConfig, direction string, text string) string {
-	hash := contentHash(direction + "|" + text)
-	if cached, ok := cacheGet(hash); ok {
+	var hash = contentHash(direction + "|" + text)
+	var cached, ok = cacheGet(hash)
+	if ok {
 		return cached
 	}
-	out := translateVia(cfg, direction, text)
+	var out = translateVia(cfg, direction, text)
 	if out == "" {
 		return text // never degrade: fall back to the original
 	}
@@ -167,12 +172,14 @@ func translateProseCached(cfg *serveConfig, direction string, text string) strin
 
 // translateBlocks: translate prose segments, keep code verbatim.
 func translateBlocks(cfg *serveConfig, direction string, text string) string {
-	segs := splitBlocks(text)
+	var segs = splitBlocks(text)
 	if len(segs) <= 1 && !segs[0].code {
 		return translateProseCached(cfg, direction, text)
 	}
 	var out strings.Builder
-	for _, s := range segs {
+	var s seg
+
+	for _, s = range segs {
 		if s.code {
 			out.WriteString(s.text)
 		} else if strings.TrimSpace(s.text) != "" {

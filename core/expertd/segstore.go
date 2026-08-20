@@ -53,8 +53,8 @@ func segManifestPath(session string) string {
 
 // loadManifest: read (or create) the session's segment manifest.
 func loadManifest(session string) *segManifest {
-	m := &segManifest{}
-	data, err := os.ReadFile(segManifestPath(session))
+	var m = &segManifest{}
+	var data, err = os.ReadFile(segManifestPath(session))
 	if err != nil {
 		return m
 	}
@@ -63,17 +63,19 @@ func loadManifest(session string) *segManifest {
 }
 
 func saveManifest(session string, m *segManifest) {
-	dir := segDir(session)
+	var dir = segDir(session)
 	if os.MkdirAll(dir, 0755) != nil {
 		return
 	}
-	data, _ := json.MarshalIndent(m, "", " ")
+	var data []byte
+
+	data, _ = json.MarshalIndent(m, "", " ")
 	_ = os.WriteFile(segManifestPath(session), data, 0644)
 }
 
 // previewOf: the 200-char pointer shown in live context.
 func previewOf(summary string) string {
-	p := strings.Join(strings.Fields(summary), " ")
+	var p = strings.Join(strings.Fields(summary), " ")
 	if len(p) > 200 {
 		return p[:200] + "…"
 	}
@@ -82,21 +84,24 @@ func previewOf(summary string) string {
 
 // ---- RAM LRU (the reserved 1GB) -------------------------------------------
 
-var segLRU = list.New()                       // front = hottest
-var segCache = map[int][]byte{}               // segment id -> decompressed
+var segLRU = list.New()         // front = hottest
+var segCache = map[int][]byte{} // segment id -> decompressed
 var segCacheBytes = 0
 var segCacheCap = 1 << 30 // 1GB default; GOTATO_SUMMARY_CACHE_MB overrides
 
 func segCacheInit() {
-	if v := os.Getenv("GOTATO_SUMMARY_CACHE_MB"); v != "" {
-		if mb := atoi(v); mb > 0 {
+	var v = os.Getenv("GOTATO_SUMMARY_CACHE_MB")
+	if v != "" {
+		var mb = atoi(v)
+		if mb > 0 {
 			segCacheCap = mb << 20
 		}
 	}
 }
 
 func segCacheTouch(id int) {
-	for e := segLRU.Front(); e != nil; e = e.Next() {
+	var e = segLRU.Front()
+	for e = segLRU.Front(); e != nil; e = e.Next() {
 		if e.Value.(int) == id {
 			segLRU.MoveToFront(e)
 			return
@@ -106,8 +111,8 @@ func segCacheTouch(id int) {
 
 func segCacheEvict() {
 	for segCacheBytes > segCacheCap && segLRU.Len() > 1 {
-		back := segLRU.Back()
-		id := back.Value.(int)
+		var back = segLRU.Back()
+		var id = back.Value.(int)
 		segCacheBytes -= len(segCache[id])
 		delete(segCache, id)
 		segLRU.Remove(back)
@@ -119,25 +124,25 @@ func segCacheEvict() {
 func saveSegment(session string, summary string) segMeta {
 	segMu.Lock()
 	defer segMu.Unlock()
-	m := loadManifest(session)
-	id := 1
+	var m = loadManifest(session)
+	var id = 1
 	if len(m.Segments) > 0 {
 		id = m.Segments[len(m.Segments)-1].ID + 1
 	}
-	gzRel := filepath.Join("segments", session, fmt.Sprintf("seg-%04d.gz", id))
-	gzAbs := filepath.Join(fleetDir, gzRel)
-	dir := filepath.Dir(gzAbs)
+	var gzRel = filepath.Join("segments", session, fmt.Sprintf("seg-%04d.gz", id))
+	var gzAbs = filepath.Join(fleetDir, gzRel)
+	var dir = filepath.Dir(gzAbs)
 	if os.MkdirAll(dir, 0755) != nil {
 		return segMeta{}
 	}
 	var buf strings.Builder
-	gw := gzip.NewWriter(&buf)
+	var gw = gzip.NewWriter(&buf)
 	_, _ = gw.Write([]byte(summary))
 	_ = gw.Close()
 	if os.WriteFile(gzAbs, []byte(buf.String()), 0644) != nil {
 		return segMeta{}
 	}
-	meta := segMeta{
+	var meta = segMeta{
 		ID:      id,
 		GZ:      gzRel,
 		Preview: previewOf(summary),
@@ -158,22 +163,25 @@ func saveSegment(session string, summary string) segMeta {
 // loadSegment: decompress a segment (RAM-first, gz on miss).
 func loadSegment(session string, meta segMeta) string {
 	segMu.Lock()
-	if v, ok := segCache[meta.ID]; ok {
+	var v, ok = segCache[meta.ID]
+	if ok {
 		segCacheTouch(meta.ID)
 		segMu.Unlock()
 		return string(v)
 	}
 	segMu.Unlock()
-	data, err := os.ReadFile(filepath.Join(fleetDir, meta.GZ))
+	var data, err = os.ReadFile(filepath.Join(fleetDir, meta.GZ))
 	if err != nil {
 		return ""
 	}
-	zr, err := gzip.NewReader(strings.NewReader(string(data)))
+	var zr *gzip.Reader
+
+	zr, err = gzip.NewReader(strings.NewReader(string(data)))
 	if err != nil {
 		return ""
 	}
 	var out strings.Builder
-	sc := bufio.NewScanner(zr)
+	var sc = bufio.NewScanner(zr)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
 		out.WriteString(sc.Text())
@@ -191,14 +199,19 @@ func loadSegment(session string, meta segMeta) string {
 // scorePreview: deterministic word-overlap between the prompt and a preview
 // (shared unique words / prompt words). Cheap and stable.
 func scorePreview(prompt string, preview string) float64 {
-	pw := wordSet(prompt)
+	var pw = wordSet(prompt)
 	if len(pw) == 0 {
 		return 0
 	}
-	pv := wordSet(preview)
+	var pv = wordSet(preview)
 	var shared int = 0
-	for w := range pw {
-		if _, ok := pv[w]; ok {
+	var w string
+
+	for w = range pw {
+		var ok bool
+
+		_, ok = pv[w]
+		if ok {
 			shared++
 		}
 	}
@@ -206,8 +219,10 @@ func scorePreview(prompt string, preview string) float64 {
 }
 
 func wordSet(s string) map[string]bool {
-	out := map[string]bool{}
-	for _, w := range strings.Fields(strings.ToLower(s)) {
+	var out = map[string]bool{}
+	var w string
+
+	for _, w = range strings.Fields(strings.ToLower(s)) {
 		w = strings.Trim(w, ".,;:!?()[]{}\"'`")
 		if len(w) >= 4 && !stopwords[w] {
 			out[w] = true
@@ -229,8 +244,8 @@ var stopwords = map[string]bool{
 // scoring, deterministic). Returns decompressed summaries + their pointers.
 func retrieveSegments(session string, prompt string, topK int) []segMeta {
 	segMu.Lock()
-	m := loadManifest(session)
-	segs := make([]segMeta, len(m.Segments))
+	var m = loadManifest(session)
+	var segs = make([]segMeta, len(m.Segments))
 	copy(segs, m.Segments)
 	segMu.Unlock()
 	type scored struct {
@@ -238,23 +253,31 @@ func retrieveSegments(session string, prompt string, topK int) []segMeta {
 		score float64
 	}
 	var hits []scored
-	for _, s := range segs {
+	var s segMeta
+
+	for _, s = range segs {
 		// require at least 2 real shared words (score >= 0.25 with a 4-word
 		// prompt floor) - a single stopword overlap is never a match
-		if sc := scorePreview(prompt, s.Preview); sc >= 0.25 {
+		var sc = scorePreview(prompt, s.Preview)
+		if sc >= 0.25 {
 			hits = append(hits, scored{s, sc})
 		}
 	}
 	// stable sort by score desc, then newest first
-	for i := 1; i < len(hits); i++ {
-		for j := i; j > 0 && (hits[j].score > hits[j-1].score ||
+	var i = 1
+	for i = 1; i < len(hits); i++ {
+		var j = i
+		for j = i; j > 0 && (hits[j].score > hits[j-1].score ||
 			(hits[j].score == hits[j-1].score && hits[j].meta.ID > hits[j-1].meta.ID)); j-- {
 			hits[j], hits[j-1] = hits[j-1], hits[j]
 		}
 	}
 	var out []segMeta
-	for i := 0; i < len(hits) && i < topK; i++ {
-		out = append(out, hits[i].meta)
+	{
+		var i = 0
+		for i = 0; i < len(hits) && i < topK; i++ {
+			out = append(out, hits[i].meta)
+		}
 	}
 	return out
 }

@@ -1,8 +1,9 @@
 // lora.go - one LoRA linear layer: forward, backward, AdamW. All explicit.
 //
-//   y = x W^T + (alpha/r) * (x A^T) B^T
-//   dA = (dy B) x        (chain: d(xA^T) = dy B, then x A^T outer)
-//   dB = dy^T (x A^T)
+//	y = x W^T + (alpha/r) * (x A^T) B^T
+//	dA = (dy B) x        (chain: d(xA^T) = dy B, then x A^T outer)
+//	dB = dy^T (x A^T)
+//
 // Weights are row-major [out][in], matching GGUF matmul layout.
 package main
 

@@ -1,23 +1,25 @@
 // gguf.go - minimal GGUF v3 reader (little-endian), stdlib only.
 //
 // Layout:
-//   magic "GGUF" u32 | version u32 | tensor_count u64 | kv_count u64
-//   kv entries: key(string) + value(type u32 + payload)
-//   tensor infos: name(string) + n_dim u32 + dims[u64] + ggml_type u32 + offset u64
-//   data section starts 32-byte aligned after the info section
+//
+//	magic "GGUF" u32 | version u32 | tensor_count u64 | kv_count u64
+//	kv entries: key(string) + value(type u32 + payload)
+//	tensor infos: name(string) + n_dim u32 + dims[u64] + ggml_type u32 + offset u64
+//	data section starts 32-byte aligned after the info section
 package main
 
 import (
 	"encoding/binary"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"syscall"
 )
 
 const (
-	ggmlF32 uint32 = 0
-	ggmlF16 uint32 = 1
+	ggmlF32  uint32 = 0
+	ggmlF16  uint32 = 1
 	ggmlQ8_0 uint32 = 8
 )
 
@@ -32,43 +34,56 @@ type tensorInfo struct {
 type ggufFile struct {
 	data  []byte // mmap of the whole file
 	infos []tensorInfo
-	align uint64 // data section absolute offset
+	align uint64         // data section absolute offset
 	kv    map[string]any // metadata key-values (strings/numbers/arrays)
 }
 
 // kvString / kvInt / kvFloat / kvArray: typed metadata accessors.
 func (g *ggufFile) kvString(key string) string {
-	if v, ok := g.kv[key].(string); ok {
+	var v, ok = g.kv[key].(string)
+	if ok {
 		return v
 	}
 	return ""
 }
 
 func (g *ggufFile) kvInt(key string) int {
-	if v, ok := g.kv[key].(int); ok {
+	var v, ok = g.kv[key].(int)
+	if ok {
 		return v
 	}
-	if v, ok := g.kv[key].(int64); ok {
-		return int(v)
+	{
+		var v, ok = g.kv[key].(int64)
+		if ok {
+			return int(v)
+		}
 	}
 	return 0
 }
 
 func (g *ggufFile) kvFloat(key string) float64 {
-	if v, ok := g.kv[key].(float64); ok {
+	var v, ok = g.kv[key].(float64)
+	if ok {
 		return v
 	}
-	if v, ok := g.kv[key].(int); ok {
-		return float64(v)
+	{
+		var v, ok = g.kv[key].(int)
+		if ok {
+			return float64(v)
+		}
 	}
-	if v, ok := g.kv[key].(int64); ok {
-		return float64(v)
+	{
+		var v, ok = g.kv[key].(int64)
+		if ok {
+			return float64(v)
+		}
 	}
 	return 0
 }
 
 func (g *ggufFile) kvArray(key string) []any {
-	if v, ok := g.kv[key].([]any); ok {
+	var v, ok = g.kv[key].([]any)
+	if ok {
 		return v
 	}
 	return nil
@@ -116,19 +131,23 @@ func (g *ggufFile) skipValue(off uint64, vtype uint32) uint64 {
 }
 
 func loadGGUF(path string) (*ggufFile, error) {
-	f, err := os.Open(path)
+	var f, err = os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	st, err := f.Stat()
+	var st fs.FileInfo
+
+	st, err = f.Stat()
 	if err != nil {
 		return nil, err
 	}
-	data, err := syscall.Mmap(int(f.Fd()), 0, int(st.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
+	var data []byte
+
+	data, err = syscall.Mmap(int(f.Fd()), 0, int(st.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
 		return nil, err
 	}
-	g := &ggufFile{data: data, kv: map[string]any{}}
+	var g = &ggufFile{data: data, kv: map[string]any{}}
 	var off uint64 = 0
 	var magic uint32 = g.u32(off)
 	off += 4
@@ -227,7 +246,7 @@ func f16ToF32(h uint16) float32 {
 	var exp uint32 = uint32(h>>10) & 0x1F
 	var man uint32 = uint32(h) & 0x3FF
 	if exp == 0 {
-		return math.Float32frombits((sign << 31) | man << 13) // subnormal
+		return math.Float32frombits((sign << 31) | man<<13) // subnormal
 	}
 	if exp == 0x1F {
 		return math.Float32frombits((sign << 31) | 0x7F800000) // inf/nan -> inf

@@ -2,8 +2,8 @@
 // Codex / OMP / Pi: alternate screen, block transcript, live status line,
 // bottom input. Raw mode via Linux termios (stdlib syscall only).
 //
-//   chat mode   : SSE-streamed answers with a live Thinking [SLM-tag] line
-//   cowork mode : tool calls rendered as blocks as they execute
+//	chat mode   : SSE-streamed answers with a live Thinking [SLM-tag] line
+//	cowork mode : tool calls rendered as blocks as they execute
 //
 // Keys: Enter submit, Backspace edit, Ctrl-U clear line, Ctrl-C interrupt or
 // quit at the prompt, Up/Down history, Ctrl-D quit.
@@ -31,7 +31,9 @@ type termios struct {
 }
 
 func ioctlTerm(fd uintptr, req uintptr, arg unsafe.Pointer) error {
-	_, _, e := syscall.Syscall(syscall.SYS_IOCTL, fd, req, uintptr(arg))
+	var e syscall.Errno
+
+	_, _, e = syscall.Syscall(syscall.SYS_IOCTL, fd, req, uintptr(arg))
 	if e != 0 {
 		return e
 	}
@@ -43,7 +45,7 @@ func termRaw() func() {
 	if ioctlTerm(0, syscall.TCGETS, unsafe.Pointer(&t)) != nil {
 		return func() {}
 	}
-	saved := t
+	var saved = t
 	t.Iflag &^= syscall.IGNBRK | syscall.BRKINT | syscall.PARMRK | syscall.ISTRIP |
 		syscall.INLCR | syscall.IGNCR | syscall.ICRNL | syscall.IXON
 	t.Lflag &^= syscall.ECHO | syscall.ICANON | syscall.IEXTEN | syscall.ISIG
@@ -107,9 +109,12 @@ var outMu sync.Mutex
 // palette color from their name hash, so the same SLM always renders the
 // same color.
 func slmColor(tag string) string {
-	base := tag
-	if i := strings.Index(tag, " \u00b7 "); i >= 0 {
-		base = tag[:i]
+	var base = tag
+	{
+		var i = strings.Index(tag, " \u00b7 ")
+		if i >= 0 {
+			base = tag[:i]
+		}
 	}
 	switch base {
 	case "python-expert":
@@ -137,7 +142,9 @@ func wrapText(text string, width int) string {
 	}
 	var sb strings.Builder
 	var line strings.Builder
-	for _, r := range text {
+	var r rune
+
+	for _, r = range text {
 		if r == '\n' {
 			sb.WriteString(line.String() + "\n")
 			line.Reset()
@@ -155,24 +162,26 @@ func wrapText(text string, width int) string {
 
 func (v *view) render() {
 	v.mu.Lock()
-	blocks := v.blocks
-	input := v.input
-	status := v.status
+	var blocks = v.blocks
+	var input = v.input
+	var status = v.status
 	v.mu.Unlock()
-	rows, w := termSize()
+	var rows, w = termSize()
 	v.width = w
 	// pinned bottom bar: status line (if any) + input line
-	barLines := 1
+	var barLines = 1
 	if status != "" {
 		barLines++
 	}
-	avail := rows - barLines
+	var avail = rows - barLines
 	if avail < 3 {
 		avail = 3
 	}
 	// render every block to lines, then keep only the tail that fits
 	var all []string
-	for _, b := range blocks {
+	var b block
+
+	for _, b = range blocks {
 		switch b.kind {
 		case bMeta:
 			if b.text != "" {
@@ -199,7 +208,9 @@ func (v *view) render() {
 	}
 	var sb strings.Builder
 	sb.WriteString("\033[H\033[?25l\033[J") // home, hide cursor, clear down (no flash)
-	for _, l := range all {
+	var l string
+
+	for _, l = range all {
 		sb.WriteString(l + "\n")
 	}
 	if status != "" {
@@ -230,7 +241,7 @@ func appendAssistant(tag string, text string) {
 	if len(theView.blocks) == 0 || theView.blocks[len(theView.blocks)-1].kind != bAssistant {
 		theView.blocks = append(theView.blocks, block{kind: bAssistant, tag: tag})
 	}
-	last := &theView.blocks[len(theView.blocks)-1]
+	var last = &theView.blocks[len(theView.blocks)-1]
 	last.text += text
 	theView.mu.Unlock()
 }
@@ -255,9 +266,9 @@ type keyMsg struct {
 }
 
 func stdinLoop(keys chan keyMsg) {
-	reader := bufio.NewReader(os.Stdin)
+	var reader = bufio.NewReader(os.Stdin)
 	for {
-		b, err := reader.ReadByte()
+		var b, err = reader.ReadByte()
 		if err != nil {
 			close(keys)
 			return
@@ -274,9 +285,13 @@ func stdinLoop(keys chan keyMsg) {
 		case 21:
 			keys <- keyMsg{kind: keyCtrlU}
 		case 27:
-			b2, _ := reader.ReadByte()
+			var b2 byte
+
+			b2, _ = reader.ReadByte()
 			if b2 == 91 {
-				b3, _ := reader.ReadByte()
+				var b3 byte
+
+				b3, _ = reader.ReadByte()
 				if b3 == 65 {
 					keys <- keyMsg{kind: keyUp}
 				} else if b3 == 66 {
@@ -300,7 +315,8 @@ func chatCmd(args []string) {
 	var cowork bool = false
 	var useMCP bool = false
 	var coworkBackend string = "http://127.0.0.1:8086"
-	for i := 0; i < len(args); i++ {
+	var i = 0
+	for i = 0; i < len(args); i++ {
 		switch args[i] {
 		case "--gateway":
 			if i+1 < len(args) {
@@ -325,12 +341,12 @@ func chatCmd(args []string) {
 		}
 	}
 
-	restore := termRaw()
+	var restore = termRaw()
 	defer restore()
 	fmt.Print("\033[?1049h\033[?25l")
 	defer fmt.Print("\033[?25h\033[?1049l")
 
-	mode := "chat"
+	var mode = "chat"
 	if cowork {
 		mode = "cowork"
 	}
@@ -338,7 +354,7 @@ func chatCmd(args []string) {
 		" · session "+session+" · Ctrl-C quit")
 	requestRender()
 
-	keys := make(chan keyMsg, 64)
+	var keys = make(chan keyMsg, 64)
 	go stdinLoop(keys)
 
 	var history []string
@@ -346,14 +362,19 @@ func chatCmd(args []string) {
 	var input strings.Builder
 	var busy bool = false
 	var abort chan bool = nil
-	tick := time.NewTicker(60 * time.Millisecond)
+	var tick = time.NewTicker(60 * time.Millisecond)
 	defer tick.Stop()
 
 	for {
+
+		// live spinner / elapsed
+
+		var k keyMsg
+		var ok bool
 		select {
 		case <-tick.C:
 			if busy {
-				theView.render() // live spinner / elapsed
+				theView.render()
 			}
 		case <-renderReq:
 			theView.render()
@@ -361,7 +382,7 @@ func chatCmd(args []string) {
 			busy = false
 			abort = nil
 			requestRender()
-		case k, ok := <-keys:
+		case k, ok = <-keys:
 			if !ok {
 				if busy {
 					// stdin closed mid-turn: let the turn finish, then exit
@@ -382,7 +403,7 @@ func chatCmd(args []string) {
 			case keyCtrlC, keyCtrlD:
 				return
 			case keyEnter:
-				line := strings.TrimSpace(input.String())
+				var line = strings.TrimSpace(input.String())
 				input.Reset()
 				if line == "" {
 					requestRender()
@@ -403,7 +424,7 @@ func chatCmd(args []string) {
 					go chatRun(gateway, session, line, abort)
 				}
 			case keyBackspace:
-				s := input.String()
+				var s = input.String()
 				if len(s) > 0 {
 					input.Reset()
 					input.WriteString(s[:len(s)-1])
@@ -452,33 +473,37 @@ func requestRender() {
 
 // ---- chat mode: SSE streaming from the gateway -------------------------------
 func chatRun(gateway string, session string, prompt string, abort chan bool) {
-	body, _ := json.Marshal(map[string]any{
+	var body []byte
+
+	body, _ = json.Marshal(map[string]any{
 		"prompt": prompt, "n_predict": 256, "session": session, "stream": true})
-	req, err := http.NewRequest("POST", gateway+"/completion", strings.NewReader(string(body)))
+	var req, err = http.NewRequest("POST", gateway+"/completion", strings.NewReader(string(body)))
 	if err != nil {
 		pushBlock(bTool, "error", err.Error())
 		finishTurn()
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(req)
+	var resp *http.Response
+
+	resp, err = httpClient.Do(req)
 	if err != nil {
 		pushBlock(bTool, "error", "gateway unreachable: "+err.Error())
 		finishTurn()
 		return
 	}
 	defer resp.Body.Close()
-	slm := resp.Header.Get("X-Gotato-SLM")
+	var slm = resp.Header.Get("X-Gotato-SLM")
 	if slm == "" {
 		slm = resp.Header.Get("X-Gotato-Backend")
 	}
-	tag := slm
-	start := time.Now()
-	sc := bufio.NewScanner(resp.Body)
+	var tag = slm
+	var start = time.Now()
+	var sc = bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	var thinking bool = false
 	var content strings.Builder
-	spinner := []string{"|", "/", "-", "\\"}
+	var spinner = []string{"|", "/", "-", "\\"}
 	var si int = 0
 	for {
 		select {
@@ -491,7 +516,7 @@ func chatRun(gateway string, session string, prompt string, abort chan bool) {
 		if !sc.Scan() {
 			break
 		}
-		line := sc.Text()
+		var line = sc.Text()
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
@@ -504,7 +529,7 @@ func chatRun(gateway string, session string, prompt string, abort chan bool) {
 		}
 		if frame.Content != "" {
 			content.WriteString(frame.Content)
-			cur := content.String()
+			var cur = content.String()
 			if strings.Contains(cur, "<think>") && !strings.Contains(cur, "</think>") {
 				thinking = true
 				setStatus(cYellow + "  ⟳ Thinking... " + cBold + slmColor(tag) + tag +
@@ -512,10 +537,11 @@ func chatRun(gateway string, session string, prompt string, abort chan bool) {
 					fmt.Sprintf("%.0fs", time.Since(start).Seconds()) + cReset)
 			}
 			if thinking {
-				if i := strings.Index(cur, "</think>"); i >= 0 {
+				var i = strings.Index(cur, "</think>")
+				if i >= 0 {
 					thinking = false
 					setStatus("")
-					rest := cur[i+len("</think>"):]
+					var rest = cur[i+len("</think>"):]
 					if rest != "" {
 						appendAssistant(tag, rest)
 					}
@@ -559,11 +585,12 @@ func coworkRun(backend string, session string, prompt string, useMCP bool, abort
 	} else {
 		tools = toolSchemas()
 	}
-	messages := []map[string]string{
+	var messages = []map[string]string{
 		{"role": "system", "content": coworkPrompt(tools)},
 		{"role": "user", "content": prompt},
 	}
-	for iter := 0; iter < 5; iter++ {
+	var iter = 0
+	for iter = 0; iter < 5; iter++ {
 		select {
 		case <-abort:
 			finishTurn()
@@ -573,10 +600,12 @@ func coworkRun(backend string, session string, prompt string, useMCP bool, abort
 		}
 		setStatus(cYellow + "  ⟳ " + strings.Repeat("·", iter+1) + cReset)
 		requestRender()
-		body, _ := json.Marshal(map[string]any{
+		var body []byte
+
+		body, _ = json.Marshal(map[string]any{
 			"messages": messages, "temperature": 0, "max_tokens": 400,
 			"enable_thinking": false})
-		resp, err := httpPostJSON(backend+"/v1/chat/completions", body)
+		var resp, err = httpPostJSON(backend+"/v1/chat/completions", body)
 		if err != nil {
 			pushBlock(bTool, "error", "backend unreachable")
 			finishTurn()
@@ -594,12 +623,13 @@ func coworkRun(backend string, session string, prompt string, useMCP bool, abort
 			finishTurn()
 			return
 		}
-		content := strings.TrimSpace(out.Choices[0].Message.Content)
-		m := toolCallRe.FindStringSubmatch(content)
+		var content = strings.TrimSpace(out.Choices[0].Message.Content)
+		var m = toolCallRe.FindStringSubmatch(content)
 		if m == nil && strings.Contains(content, "<tool_call>") {
-			i := strings.Index(content, "<tool_call>")
-			tail := content[i+len("<tool_call>"):]
-			if j := strings.Index(tail, "</tool_call>"); j >= 0 {
+			var i = strings.Index(content, "<tool_call>")
+			var tail = content[i+len("<tool_call>"):]
+			var j = strings.Index(tail, "</tool_call>")
+			if j >= 0 {
 				tail = tail[:j]
 			}
 			if json.Valid([]byte(strings.TrimSpace(tail))) {
@@ -607,7 +637,7 @@ func coworkRun(backend string, session string, prompt string, useMCP bool, abort
 			}
 		}
 		if m == nil {
-			answer := strings.ReplaceAll(content, "<tool_call>", "")
+			var answer = strings.ReplaceAll(content, "<tool_call>", "")
 			answer = strings.ReplaceAll(answer, "</tool_call>", "")
 			answer = strings.TrimSpace(answer)
 			if answer != "" {
@@ -640,7 +670,7 @@ func coworkRun(backend string, session string, prompt string, useMCP bool, abort
 		} else {
 			result, isErr = execTool(call.Name, call.Arguments, false)
 		}
-		label := call.Name + " " + jsonArgsShort(call.Arguments)
+		var label = call.Name + " " + jsonArgsShort(call.Arguments)
 		if isErr {
 			pushBlock(bTool, label+" ✗", result)
 		} else {
@@ -660,7 +690,11 @@ func coworkRun(backend string, session string, prompt string, useMCP bool, abort
 
 func jsonArgsShort(args map[string]any) string {
 	var sb strings.Builder
-	for k, v := range args {
+	var k string
+
+	var v any
+
+	for k, v = range args {
 		sb.WriteString(fmt.Sprintf("%s=%v ", k, v))
 	}
 	return strings.TrimSpace(sb.String())

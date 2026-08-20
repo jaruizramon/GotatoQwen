@@ -10,16 +10,16 @@
 //     element of a stack") when no index section/backend exists for the hit.
 //
 // API (llama-server-compatible on purpose):
-//   POST /completion   {"prompt": ..., "n_predict": ..., "session": "s1"}
-//                      -> forwarded completion, or escalation JSON
-//   GET  /health       {"status":"ok"}
+//
+//	POST /completion   {"prompt": ..., "n_predict": ..., "session": "s1"}
+//	                   -> forwarded completion, or escalation JSON
+//	GET  /health       {"status":"ok"}
 //
 // Escalation responses carry "content" (what the user sees), "stop": true,
 // and the X-Gotato-Escalation header for machines.
 package main
 
 import (
-	"runtime"
 	"bufio"
 	"encoding/json"
 	"fmt"
@@ -29,6 +29,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,9 +44,9 @@ type serveConfig struct {
 	mu       *sync.Mutex       // guards backends (autostart mutates it)
 	// in-flight SLM tracking: which slice is serving RIGHT NOW. Read by
 	// GET /slms so the TUI can haptically highlight the active SLM.
-	activeName   string // slm base name ("python-expert", "2b-general", ...)
-	activeLang   string
-	activeSince  int64 // ms epoch; 0 = idle
+	activeName  string // slm base name ("python-expert", "2b-general", ...)
+	activeLang  string
+	activeSince int64 // ms epoch; 0 = idle
 }
 
 // setActive/clearActive: mark the currently-serving SLM. Called around the
@@ -70,11 +71,16 @@ func defaultServeConfig() *serveConfig {
 	return &serveConfig{
 		addr: ":8090",
 		backends: map[string]string{
-			"python":     "http://127.0.0.1:8081", // python expert (0.6B + LoRA)
 			"general":    "http://127.0.0.1:8082", // 2B generalist
 			"hard":       "http://127.0.0.1:8083", // 4B generalist
-			"rust":       "http://127.0.0.1:8084", // rust expert (0.6B + LoRA)
+			"lua":        "http://127.0.0.1:8084", // lua expert (0.6B + LoRA)
+			"rust":       "http://127.0.0.1:8085", // rust expert (0.6B + LoRA)
 			"translator": "http://127.0.0.1:8086", // 1.7B instruct (the bridge)
+			"gdscript":   "http://127.0.0.1:8087", // gdscript expert (0.6B + LoRA)
+			"javascript": "http://127.0.0.1:8088", // javascript expert (0.6B + LoRA)
+			"python":     "http://127.0.0.1:8089", // python expert (0.6B + LoRA)
+			"typescript": "http://127.0.0.1:8092", // typescript expert (0.6B + LoRA)
+			"summarizer": "http://127.0.0.1:8093", // summarizer (0.6B + LoRA)
 		},
 		mu: &sync.Mutex{},
 	}
@@ -103,55 +109,71 @@ type completionResp struct {
 }
 
 func escalationJSON(msg string) []byte {
-	out, _ := json.Marshal(completionResp{Content: msg, Stop: true})
+	var out []byte
+
+	out, _ = json.Marshal(completionResp{Content: msg, Stop: true})
 	return out
 }
 
 // hasBackend: is a llama-server actually reachable for this language?
 func hasBackend(cfg *serveConfig, lang string) bool {
-	port, ok := cfg.backends[lang]
+	var port, ok = cfg.backends[lang]
 	if !ok {
 		return false
 	}
-	resp, err := httpClient.Get(port + "/health")
+	var resp, err = httpClient.Get(port + "/health")
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	var body []byte
+
+	body, _ = io.ReadAll(resp.Body)
 	return strings.Contains(string(body), "ok")
 }
 
 // autostartLang: spawn a llama-server for a ready expert of lang (the
 // "say yes and I will start one" promise). Returns the backend URL or "".
 func autostartLang(cfg *serveConfig, lang string) string {
-	idx := loadIndex()
-	e, ok := idx[lang]
+	var idx = loadIndex()
+	var e, ok = idx[lang]
 	if !ok || e.Status != "ready" || (e.Lora == "" && e.Mask == "") {
 		return ""
 	}
-	base := fleetDir + "/" + e.Base
+	var base = fleetDir + "/" + e.Base
 	var servePath string = base
 	var lora string = ""
 	if e.Mask != "" {
 		// a mask slice IS the model: zeroed weights, no adapter
 		servePath = fleetDir + "/" + e.Mask
-		if _, err := os.Stat(servePath); err != nil {
+		var err error
+
+		_, err = os.Stat(servePath)
+		if err != nil {
 			return ""
 		}
 	} else {
 		lora = fleetDir + "/" + e.Lora
-		if _, err := os.Stat(base); err != nil {
+		var err error
+
+		_, err = os.Stat(base)
+		if err != nil {
 			return ""
 		}
-		if _, err := os.Stat(lora); err != nil {
-			return ""
+		{
+			var err error
+
+			_, err = os.Stat(lora)
+			if err != nil {
+				return ""
+			}
 		}
 	}
 	var port int = 8084
 	for {
-		url := fmt.Sprintf("http://127.0.0.1:%d", port)
-		if resp, err := httpClient.Get(url + "/health"); err != nil || resp.StatusCode != 200 {
+		var url = fmt.Sprintf("http://127.0.0.1:%d", port)
+		var resp, err = httpClient.Get(url + "/health")
+		if err != nil || resp.StatusCode != 200 {
 			break
 		}
 		port++
@@ -159,8 +181,8 @@ func autostartLang(cfg *serveConfig, lang string) string {
 			return ""
 		}
 	}
-	serverBin := strings.TrimSuffix(llamaCli, "llama-cli") + "llama-server"
-	cmdArgs := []string{"-m", servePath}
+	var serverBin = strings.TrimSuffix(llamaCli, "llama-cli") + "llama-server"
+	var cmdArgs = []string{"-m", servePath}
 	if lora != "" {
 		cmdArgs = append(cmdArgs, "--lora", lora)
 	}
@@ -168,18 +190,22 @@ func autostartLang(cfg *serveConfig, lang string) string {
 	// 4 slots of ~1024 each, and a chained omp prompt (3400+ tokens) cannot
 	// fit one slot -> "Context size has been exceeded" -> empty replies.
 	cmdArgs = append(cmdArgs, "-t", "4", "-c", "4096", "-np", "1", "--port", strconv.Itoa(port))
-	cmd := exec.Command(serverBin, cmdArgs...)
+	var cmd = exec.Command(serverBin, cmdArgs...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
+	var err = cmd.Start()
+	if err != nil {
 		return ""
 	}
-	url := fmt.Sprintf("http://127.0.0.1:%d", port)
-	for i := 0; i < 60; i++ {
-		resp, err := httpClient.Get(url + "/health")
+	var url = fmt.Sprintf("http://127.0.0.1:%d", port)
+	var i = 0
+	for i = 0; i < 60; i++ {
+		var resp, err = httpClient.Get(url + "/health")
 		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
+			var body []byte
+
+			body, _ = io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if strings.Contains(string(body), "ok") {
 				cfg.mu.Lock()
@@ -211,28 +237,30 @@ type routePlan struct {
 // normalization. Shared by /completion and /v1/chat/completions so both
 // entry points run identical routing.
 func routeCompletion(cfg *serveConfig, req *completionReq) *routePlan {
-	r := &routePlan{}
+	var r = &routePlan{}
 
 	// ---- consent flow: "yes" to a pending escalation ----------------
 	// Scoped on the routing text (chat endpoint: the LAST user message) so
 	// an agent system prompt full of "yes/ok/do it" can never accidentally
 	// consent to a pending delegation.
-	routeText := req.RoutePrompt
+	var routeText = req.RoutePrompt
 	if routeText == "" {
 		routeText = req.Prompt
 	}
 	var pendingLang string = ""
-	if prev, ok := lastSessionTurn(req.Session); ok && prev.Pending != "" {
+	var prev, ok = lastSessionTurn(req.Session)
+	if ok && prev.Pending != "" {
 		pendingLang = prev.Pending
 	}
 	if pendingLang != "" {
-		lower := strings.ToLower(routeText)
+		var lower = strings.ToLower(routeText)
 		var consented bool = strings.Contains(lower, "yes") ||
 			strings.Contains(lower, "sure") || strings.Contains(lower, "go ahead") ||
 			strings.Contains(lower, "ok") || strings.Contains(lower, "delegate") ||
 			strings.Contains(lower, "do it")
 		if consented {
-			if url := autostartLang(cfg, pendingLang); url != "" {
+			var url = autostartLang(cfg, pendingLang)
+			if url != "" {
 				fmt.Fprintf(os.Stderr, "[gateway] autostarted %s backend at %s\n", pendingLang, url)
 				// adopt the owner so the next task reaches the new slice
 				appendTurn(turn{Session: req.Session, Ts: time.Now().UnixMilli(),
@@ -278,7 +306,8 @@ func routeCompletion(cfg *serveConfig, req *completionReq) *routePlan {
 	// "general" or an unknown word.
 	var fromBrain bool = false
 	if routeText != "" {
-		if topic := routerBrain(cfg, routeText); topic != "" {
+		var topic = routerBrain(cfg, routeText)
+		if topic != "" {
 			semanticLang = topic
 			semanticLabel = topic
 			fromBrain = true
@@ -286,17 +315,18 @@ func routeCompletion(cfg *serveConfig, req *completionReq) *routePlan {
 		}
 	}
 	if !fromBrain {
-		if hits := resolveIndex(idxPath, routeText, 2); len(hits) > 0 {
-		top := hits[0]
-		if len(hits) > 1 && hits[1].Score > 0 {
-			semanticMargin = top.Score / hits[1].Score
-		} else {
-			semanticMargin = 2.0
-		}
-		if semanticMargin >= 2.0 {
-			semanticLang = top.Lang
-			semanticLabel = top.Label
-		}
+		var hits = resolveIndex(idxPath, routeText, 2)
+		if len(hits) > 0 {
+			var top = hits[0]
+			if len(hits) > 1 && hits[1].Score > 0 {
+				semanticMargin = top.Score / hits[1].Score
+			} else {
+				semanticMargin = 2.0
+			}
+			if semanticMargin >= 2.0 {
+				semanticLang = top.Lang
+				semanticLabel = top.Label
+			}
 		}
 	}
 	// lexical scope signal: when the index has no opinion but the prompt
@@ -322,8 +352,11 @@ func routeCompletion(cfg *serveConfig, req *completionReq) *routePlan {
 		scopeLabel = lexLang
 	}
 	var ownerLang string = ""
-	if prev, ok := lastSessionTurn(req.Session); ok {
-		ownerLang = prev.Lang
+	{
+		var prev, ok = lastSessionTurn(req.Session)
+		if ok {
+			ownerLang = prev.Lang
+		}
 	}
 	fmt.Fprintf(os.Stderr, "[gateway] session=%s owner=%q semantic=%q/%q lex=%q/hits=%d scope=%q codeish=%v\n",
 		req.Session, ownerLang, semanticLang, semanticLabel, lexLang, lexHits, scopeLang,
@@ -338,7 +371,7 @@ func routeCompletion(cfg *serveConfig, req *completionReq) *routePlan {
 				SLM: "brain-switch", Lang: scopeLang, Tokens: 0, WallMs: 0,
 				ScopeEvent: "brain-switch->" + scopeLang})
 		} else {
-			msg := fmt.Sprintf(
+			var msg = fmt.Sprintf(
 				"destination hit out of scope - shall we delegate an SLM for %s (%s)?",
 				scopeLabel, scopeLang)
 			appendTurn(turn{Session: req.Session, Ts: time.Now().UnixMilli(),
@@ -362,17 +395,29 @@ func routeCompletion(cfg *serveConfig, req *completionReq) *routePlan {
 			target = autostartLang(cfg, scopeLang)
 		}
 		if target == "" {
-			msg := fmt.Sprintf(
-				"no %s slice is running yet - say yes and I will slice an SLM for %s "+
-					"(or add a %s element to the stack so the watcher picks it up).",
-				scopeLang, scopeLang, scopeLang)
-			appendTurn(turn{Session: req.Session, Ts: time.Now().UnixMilli(),
-				SLM: "none", Lang: ownerLang, Tokens: 0, WallMs: 0,
-				ScopeEvent: "missing-slice->" + scopeLang, Escalation: msg,
-				Pending: scopeLang})
-			r.override = msg
-			r.overrideHeader = "missing-slice->" + scopeLang
-			return r
+			if fromBrain {
+				// no slice for the brain's topic (e.g. html-css on the
+				// potato, whose adapter is built on the big machine): answer
+				// with the generalist instead of an escalation - the 2B/4B
+				// can still handle it, and training stays off this box.
+				fmt.Fprintf(os.Stderr, "[gateway] no %s slice - generalist fallback\n", scopeLang)
+				target = cfg.backends["general"]
+				if target == "" {
+					target = cfg.backends["hard"]
+				}
+			} else {
+				var msg = fmt.Sprintf(
+					"no %s slice is running yet - say yes and I will slice an SLM for %s "+
+						"(or add a %s element to the stack so the watcher picks it up).",
+					scopeLang, scopeLang, scopeLang)
+				appendTurn(turn{Session: req.Session, Ts: time.Now().UnixMilli(),
+					SLM: "none", Lang: ownerLang, Tokens: 0, WallMs: 0,
+					ScopeEvent: "missing-slice->" + scopeLang, Escalation: msg,
+					Pending: scopeLang})
+				r.override = msg
+				r.overrideHeader = "missing-slice->" + scopeLang
+				return r
+			}
 		}
 	}
 	// no semantic hit: fall back to the owner, then the generalist
@@ -396,7 +441,9 @@ func routeCompletion(cfg *serveConfig, req *completionReq) *routePlan {
 	}
 	var fwdBody string = ""
 	{
-		rawBody, _ := json.Marshal(req)
+		var rawBody []byte
+
+		rawBody, _ = json.Marshal(req)
 		fwdBody = string(rawBody)
 	}
 
@@ -461,7 +508,7 @@ func serveHandler(cfg *serveConfig) http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
-		body, err := io.ReadAll(r.Body)
+		var body, err = io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "read body", 400)
 			return
@@ -476,7 +523,7 @@ func serveHandler(cfg *serveConfig) http.HandlerFunc {
 		}
 
 		// ---- route: scope protocol + chain + bridge -> forwarding plan
-		plan := routeCompletion(cfg, &req)
+		var plan = routeCompletion(cfg, &req)
 		if plan.override != "" {
 			w.Header().Set("Content-Type", "application/json")
 			if plan.overrideHeader != "" {
@@ -489,8 +536,10 @@ func serveHandler(cfg *serveConfig) http.HandlerFunc {
 		// ---- forward to the chosen SLM ------------------------------------
 		cfg.setActive(slmBaseName(plan.target, plan.servedLang), plan.servedLang)
 		defer cfg.clearActive()
-		t0 := time.Now()
-		resp, err := httpClient.Post(plan.target+"/completion", "application/json", strings.NewReader(plan.fwdBody))
+		var t0 = time.Now()
+		var resp *http.Response
+
+		resp, err = httpClient.Post(plan.target+"/completion", "application/json", strings.NewReader(plan.fwdBody))
 		if err != nil {
 			http.Error(w, `{"error":"backend unreachable: `+plan.target+`"}`, 502)
 			return
@@ -501,7 +550,9 @@ func serveHandler(cfg *serveConfig) http.HandlerFunc {
 			streamRelay(w, resp, &req, plan.target, plan.slmTag, t0, plan.servedLang)
 			return
 		}
-		out, _ := io.ReadAll(resp.Body)
+		var out []byte
+
+		out, _ = io.ReadAll(resp.Body)
 
 		// ledger + archive BEFORE writing, so headers and content reach
 		// the client.
@@ -513,7 +564,7 @@ func serveHandler(cfg *serveConfig) http.HandlerFunc {
 		var respTimings struct {
 			Timings struct {
 				PredictedN int `json:"predicted_n"`
-				PromptN   int `json:"prompt_n"`
+				PromptN    int `json:"prompt_n"`
 			} `json:"timings"`
 		}
 		_ = json.Unmarshal(out, &respTimings)
@@ -533,7 +584,9 @@ func serveHandler(cfg *serveConfig) http.HandlerFunc {
 		if json.Unmarshal(out, &cr2) == nil && cr2.Content != "" {
 			if bridgeZH {
 				cr2.Content = translateToEN(cfg, cr2.Content)
-				chainedOut, _ := json.Marshal(cr2)
+				var chainedOut []byte
+
+				chainedOut, _ = json.Marshal(cr2)
 				out = chainedOut
 				w.Header().Set("X-Gotato-Bridge", "zh")
 			}
@@ -548,9 +601,10 @@ func serveHandler(cfg *serveConfig) http.HandlerFunc {
 }
 
 func serveCmd(args []string) {
-	cfg := defaultServeConfig()
+	var cfg = defaultServeConfig()
 	verifyURL = cfg.backends["general"] // the 2B verifies the tool-executor's writes
-	for i := 0; i < len(args); i++ {
+	var i = 0
+	for i = 0; i < len(args); i++ {
 		if args[i] == "--addr" && i+1 < len(args) {
 			cfg.addr = args[i+1]
 			i++
@@ -558,7 +612,7 @@ func serveCmd(args []string) {
 			bridgeZH = args[i+1] == "zh"
 		}
 	}
-	mux := http.NewServeMux()
+	var mux = http.NewServeMux()
 	mux.HandleFunc("/completion", serveHandler(cfg))
 	mux.HandleFunc("/health", serveHandler(cfg))
 	mux.HandleFunc("/slms", slmsHandler(cfg))
@@ -567,16 +621,17 @@ func serveCmd(args []string) {
 	mux.HandleFunc("/manifest", manifestHandler)
 	mux.HandleFunc("/memstats", memstatsHandler(cfg))
 	segCacheInit() // the reserved summary-RAM cap (GOTATO_SUMMARY_CACHE_MB)
-	warmState() // one cold ledger read; the hot state is RAM-only afterwards
+	warmState()    // one cold ledger read; the hot state is RAM-only afterwards
 	fmt.Printf("[gateway] listening on %s | backends: %v\n", cfg.addr, cfg.backends)
-	if err := http.ListenAndServe(cfg.addr, mux); err != nil {
+	var err = http.ListenAndServe(cfg.addr, mux)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
 func backendPort(url string) string {
-	i := strings.LastIndex(url, ":")
+	var i = strings.LastIndex(url, ":")
 	if i < 0 {
 		return url
 	}
@@ -598,29 +653,39 @@ func slmsHandler(cfg *serveConfig) http.HandlerFunc {
 			return
 		}
 		cfg.mu.Lock()
-		backends := make(map[string]string, len(cfg.backends))
-		for k, v := range cfg.backends {
+		var backends = make(map[string]string, len(cfg.backends))
+		var k string
+
+		var v string
+
+		for k, v = range cfg.backends {
 			backends[k] = v
 		}
-		activeName, activeLang, activeSince := cfg.activeName, cfg.activeLang, cfg.activeSince
+		var activeName, activeLang, activeSince = cfg.activeName, cfg.activeLang, cfg.activeSince
 		cfg.mu.Unlock()
 
 		// ledger-discovered slices: SLMs that served turns but are not in the
 		// configured map (manually started servers) still belong in the roster
 		// - "all of the used SLMs shown" is the contract.
-		ledgerLangs := map[string]string{} // url -> lang
-		if f, err := os.Open(sessionsPath); err == nil {
-			sc := bufio.NewScanner(f)
+		var ledgerLangs = map[string]string{} // url -> lang
+		var f, err = os.Open(sessionsPath)
+		if err == nil {
+			var sc = bufio.NewScanner(f)
 			sc.Buffer(make([]byte, 1<<20), 1<<20)
 			for sc.Scan() {
 				var t turn
 				if json.Unmarshal(sc.Bytes(), &t) != nil {
 					continue
 				}
-				for _, prefix := range []string{"backend(", "autostart("} {
+				var prefix string
+
+				for _, prefix = range []string{"backend(", "autostart("} {
 					if strings.HasPrefix(t.SLM, prefix) && strings.HasSuffix(t.SLM, ")") {
-						url := strings.TrimSuffix(strings.TrimPrefix(t.SLM, prefix), ")")
-						if _, ok := backends[t.Lang]; !ok && t.Lang != "" {
+						var url = strings.TrimSuffix(strings.TrimPrefix(t.SLM, prefix), ")")
+						var ok bool
+
+						_, ok = backends[t.Lang]
+						if !ok && t.Lang != "" {
 							backends[t.Lang] = url
 							ledgerLangs[url] = t.Lang
 						}
@@ -630,7 +695,7 @@ func slmsHandler(cfg *serveConfig) http.HandlerFunc {
 			f.Close()
 		}
 		_ = activeLang // carried for symmetry; the TUI keys on the name
-		uses := ledgerUsesByTarget()
+		var uses = ledgerUsesByTarget()
 		type slmEntry struct {
 			Name   string `json:"name"`
 			Lang   string `json:"lang"`
@@ -645,18 +710,25 @@ func slmsHandler(cfg *serveConfig) http.HandlerFunc {
 		// first (the 2B brain) and the 4B hard fallback. Slices from other
 		// stacks (gdscript-slice, rust-slice, ...) never appear.
 		var rosterLangs []string = stackManifestLangs()
-		roster := make([]slmEntry, 0, len(rosterLangs)+2)
-		if gen, ok := backends["general"]; ok {
+		var roster = make([]slmEntry, 0, len(rosterLangs)+2)
+		var gen, ok = backends["general"]
+		if ok {
 			roster = append(roster, slmEntry{Name: "2b-general", Lang: "general",
 				Port: backendPort(gen), Target: gen, Uses: uses[gen], Used: uses[gen] > 0})
 		}
-		if hard, ok := backends["hard"]; ok {
-			roster = append(roster, slmEntry{Name: "4b-general", Lang: "hard",
-				Port: backendPort(hard), Target: hard, Uses: uses[hard], Used: uses[hard] > 0})
+		{
+			var hard, ok = backends["hard"]
+			if ok {
+				roster = append(roster, slmEntry{Name: "4b-general", Lang: "hard",
+					Port: backendPort(hard), Target: hard, Uses: uses[hard], Used: uses[hard] > 0})
+			}
 		}
-		for _, lang := range rosterLangs {
+		var lang string
+
+		for _, lang = range rosterLangs {
 			var url string = ""
-			if b, ok := backends[lang]; ok && hasBackend(cfg, lang) {
+			var b, ok = backends[lang]
+			if ok && hasBackend(cfg, lang) {
 				url = b
 			}
 			roster = append(roster, slmEntry{
@@ -670,7 +742,9 @@ func slmsHandler(cfg *serveConfig) http.HandlerFunc {
 		}
 		var active *slmEntry
 		if activeName != "" {
-			for i := range roster {
+			var i int
+
+			for i = range roster {
 				if roster[i].Name == activeName {
 					active = &roster[i]
 					break
@@ -693,21 +767,33 @@ func slmsHandler(cfg *serveConfig) http.HandlerFunc {
 }
 
 func mustJSON(v any) string {
-	out, _ := json.Marshal(v)
+	var out []byte
+
+	out, _ = json.Marshal(v)
 	return string(out)
 }
 
 // memstatsHandler: GET /memstats - runtime heap + goroutine state, so
 // memory leaks in the gateway are observable (the OMP status line polls
 // /slms; a growing HeapAlloc at constant load means a leak).
-// toolNames: the builtin tool set the chat contract exposes.
-var toolNames = []string{"list_dir", "read_file", "run_command"}
+// toolNames: the fleet tool set (derived from the registry) - the stream
+// relay uses it to hold partial <tool_call> JSON across chunks.
+var toolNames []string = func() []string {
+	var names []string = make([]string, 0, 12)
+	var t mcpTool
+
+	for _, t = range toolSchemas() {
+		names = append(names, t.Name)
+	}
+	return names
+}()
 
 // braceClose: index just past the brace that closes the object opening at
 // bi (nested-brace aware; -1 if unclosed).
 func braceClose(tail string, bi int) int {
 	var depth int = 0
-	for i := bi; i < len(tail); i++ {
+	var i = bi
+	for i = bi; i < len(tail); i++ {
 		switch tail[i] {
 		case '{':
 			depth++
@@ -725,23 +811,30 @@ func braceClose(tail string, bi int) int {
 // call pattern (wrapped or bare) - a chunk may have cut the pattern mid-way,
 // and emitting it would leak the call JSON to the client.
 func partialCallHold(tail string) int {
-	patterns := []string{"<tool_call>"}
-	for _, tn := range toolNames {
+	var patterns = []string{"<tool_call>"}
+	var tn string
+
+	for _, tn = range toolNames {
 		patterns = append(patterns, `{"name":"`+tn+`","arguments":{`)
 	}
 	var maxLen int = 0
-	for _, p := range patterns {
+	var p string
+
+	for _, p = range patterns {
 		if len(p) > maxLen {
 			maxLen = len(p)
 		}
 	}
-	limit := len(tail)
+	var limit = len(tail)
 	if limit > maxLen-1 {
 		limit = maxLen - 1
 	}
-	for l := limit; l >= 1; l-- {
-		suffix := tail[len(tail)-l:]
-		for _, p := range patterns {
+	var l = limit
+	for l = limit; l >= 1; l-- {
+		var suffix = tail[len(tail)-l:]
+		var p string
+
+		for _, p = range patterns {
 			if strings.HasPrefix(p, suffix) {
 				return len(tail) - l
 			}
@@ -773,12 +866,14 @@ func routerBrain(cfg *serveConfig, text string) string {
 	var prompt string = fmt.Sprintf(
 		"Classify the programming language of this task (%s, or general).\nTask: %s\nLanguage: ",
 		strings.Join(known, ", "), head)
-	body, _ := json.Marshal(map[string]any{
+	var body []byte
+
+	body, _ = json.Marshal(map[string]any{
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt}},
 		"max_tokens": 24, "temperature": 0,
 		"chat_template_kwargs": map[string]any{"enable_thinking": false}})
-	resp, err := httpPostJSONSlow(url+"/v1/chat/completions", body)
+	var resp, err = httpPostJSONSlow(url+"/v1/chat/completions", body)
 	if err != nil {
 		return ""
 	}
@@ -793,8 +888,10 @@ func routerBrain(cfg *serveConfig, text string) string {
 		return ""
 	}
 	var lower string = strings.ToLower(out.Choices[0].Message.Content)
-	for _, name := range known {
-		if regexp.MustCompile(`\b`+regexp.QuoteMeta(name)+`\b`).MatchString(lower) {
+	var name string
+
+	for _, name = range known {
+		if regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`).MatchString(lower) {
 			return name
 		}
 	}
@@ -809,7 +906,9 @@ func manifestHas(lang string) bool {
 	if langs == nil {
 		return langKnown(lang)
 	}
-	_, ok := langs[lang]
+	var ok bool
+
+	_, ok = langs[lang]
 	return ok
 }
 
@@ -818,20 +917,27 @@ func manifestHas(lang string) bool {
 // manifest exists yet. The 2B only picks from these.
 func stackManifestLangs() []string {
 	var names map[string]bool = make(map[string]bool)
-	if langs := stackManifest(); langs != nil {
-		for name := range langs {
+	var langs = stackManifest()
+	if langs != nil {
+		var name string
+
+		for name = range langs {
 			names[name] = true
 		}
 	}
 	if len(names) == 0 {
-		for name := range langCatalog {
+		var name string
+
+		for name = range langCatalog {
 			if name != "summarizer" {
 				names[name] = true
 			}
 		}
 	}
 	var out []string = make([]string, 0, len(names))
-	for name := range names {
+	var name string
+
+	for name = range names {
 		out = append(out, name)
 	}
 	sort.Strings(out)
@@ -843,7 +949,8 @@ func stackManifestLangs() []string {
 func toolBrain(cfg *serveConfig) string {
 	cfg.mu.Lock()
 	defer cfg.mu.Unlock()
-	if b, ok := cfg.backends["translator"]; ok {
+	var b, ok = cfg.backends["translator"]
+	if ok {
 		return b
 	}
 	return cfg.backends["general"]
@@ -858,8 +965,8 @@ func memstatsHandler(cfg *serveConfig) http.HandlerFunc {
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
 		stateMu.Lock()
-		nsessions := len(lastTurns)
-		nuses := len(useCounts)
+		var nsessions = len(lastTurns)
+		var nuses = len(useCounts)
 		stateMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
@@ -878,15 +985,15 @@ func stripThink(s string) string {
 		return s
 	}
 	var sb strings.Builder
-	rest := s
+	var rest = s
 	for {
-		i := strings.Index(rest, "<think>")
+		var i = strings.Index(rest, "<think>")
 		if i < 0 {
 			sb.WriteString(rest)
 			break
 		}
 		sb.WriteString(rest[:i])
-		j := strings.Index(rest[i:], "</think>")
+		var j = strings.Index(rest[i:], "</think>")
 		if j < 0 {
 			break // unterminated: drop the rest (the tag IS the ramble)
 		}
@@ -909,7 +1016,7 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
-		body, err := io.ReadAll(r.Body)
+		var body, err = io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, `{"error":{"message":"read body"}}`, 400)
 			return
@@ -920,17 +1027,17 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 				Role    string          `json:"role"`
 				Content json.RawMessage `json:"content"` // string OR [{type,text},...]
 			} `json:"messages"`
-			Stream               bool `json:"stream"`
-			MaxTokens            int  `json:"max_tokens"`
-			MaxCompletionTokens  int  `json:"max_completion_tokens"`
-			Session              string `json:"session"`
+			Stream              bool   `json:"stream"`
+			MaxTokens           int    `json:"max_tokens"`
+			MaxCompletionTokens int    `json:"max_completion_tokens"`
+			Session             string `json:"session"`
 		}
 		if json.Unmarshal(body, &creq) != nil || len(creq.Messages) == 0 {
 			http.Error(w, `{"error":{"message":"bad request"}}`, 400)
 			return
 		}
 		// content may be a plain string or an OpenAI block array; fold both.
-		contentOf := func(raw json.RawMessage) string {
+		var contentOf = func(raw json.RawMessage) string {
 			var s string
 			if json.Unmarshal(raw, &s) == nil {
 				return s
@@ -943,14 +1050,19 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 				return ""
 			}
 			var sb strings.Builder
-			for _, b := range blocks {
+			var b struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+
+			for _, b = range blocks {
 				if b.Type == "text" && b.Text != "" {
 					sb.WriteString(b.Text)
 				}
 			}
 			return sb.String()
 		}
-		session := creq.Session
+		var session = creq.Session
 		if session == "" {
 			session = r.Header.Get("X-Gotato-Session")
 		}
@@ -962,8 +1074,13 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		// n_predict cap on ad-hoc [user]/[assistant] markers.
 		var sb strings.Builder
 		var lastUser string = ""
-		for _, m := range creq.Messages {
-			content := contentOf(m.Content)
+		var m struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+
+		for _, m = range creq.Messages {
+			var content = contentOf(m.Content)
 			if strings.TrimSpace(content) == "" {
 				continue
 			}
@@ -984,7 +1101,7 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		// gateway executes them and loops with the instruct brain).
 		sb.WriteString(chatToolBlock())
 		sb.WriteString("<|im_start|>assistant\n")
-		nPredict := creq.MaxTokens
+		var nPredict = creq.MaxTokens
 		if nPredict <= 0 {
 			nPredict = creq.MaxCompletionTokens
 		}
@@ -1001,7 +1118,7 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		// ~14k-token system prompt. Truncate from the FRONT (the tail holds
 		// the recent turns + the assistant opener the SLM must continue);
 		// the router still scopes on the full last user message.
-		prompt := strings.TrimSpace(sb.String())
+		var prompt = strings.TrimSpace(sb.String())
 		// no chaining, no silent truncation: when the transcript no longer
 		// fits the backend window, signal the client (omp restarts the
 		// context from its summary cache; retrieveSegments below rehydrates
@@ -1016,25 +1133,50 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		// summary-store retrieval: if the current request matches a past
 		// segment's preview, rehydrate its full summary (RAM or gz) so a
 		// "what did we decide about X" lands on the right past point.
-		for _, seg := range retrieveSegments(session, lastUser, 2) {
-			full := loadSegment(session, seg)
+		var seg segMeta
+
+		for _, seg = range retrieveSegments(session, lastUser, 2) {
+			var full = loadSegment(session, seg)
 			if full != "" {
 				prompt = fmt.Sprintf("[PAST SEGMENT seg-%d: %s]\n%s\n\n", seg.ID, seg.Preview, full) + prompt
 			}
 		}
-		req := completionReq{Prompt: prompt, NPredict: nPredict,
+		var req = completionReq{Prompt: prompt, NPredict: nPredict,
 			Session: session, RoutePrompt: lastUser, Stream: creq.Stream, SkipBridge: true}
-		plan := routeCompletion(cfg, &req)
+		var plan = routeCompletion(cfg, &req)
 		if plan.override != "" {
-			// escalation / delegation text arrives as a normal assistant reply
-			writeChatCompletion(w, plan.override, "router", 0, 0)
+			// escalation / delegation text arrives as a normal assistant reply;
+			// streaming clients need it as SSE, not a bare JSON body.
+			if creq.Stream {
+				writeChatStreamed(w, plan.override, "router")
+			} else {
+				writeChatCompletion(w, plan.override, "router", 0, 0)
+			}
 			return
 		}
 
 		cfg.setActive(slmBaseName(plan.target, plan.servedLang), plan.servedLang)
 		defer cfg.clearActive()
-		t0 := time.Now()
-		resp, err := httpClient.Post(plan.target+"/completion", "application/json", strings.NewReader(plan.fwdBody))
+		var t0 = time.Now()
+		// The slices are Qwen3: raw /completion continuation lets them burn
+		// the whole budget on <think> rambling. Forward through the backend's
+		// chat endpoint with enable_thinking=false so the ANSWER gets the
+		// budget (the cowork loop uses the same toggle).
+		var chatBody map[string]any = map[string]any{
+			"messages":             []map[string]string{{"role": "user", "content": req.Prompt}},
+			"max_tokens":           req.NPredict,
+			"temperature":          0,
+			"stream":               req.Stream,
+			"cache_prompt":         false,
+			"chat_template_kwargs": map[string]any{"enable_thinking": false},
+			"stop":                 []string{"<|im_end|>", "<|im_start|>"},
+		}
+		var rawBody []byte
+
+		rawBody, _ = json.Marshal(chatBody)
+		var resp *http.Response
+
+		resp, err = httpClient.Post(plan.target+"/v1/chat/completions", "application/json", strings.NewReader(string(rawBody)))
 		if err != nil {
 			http.Error(w, `{"error":{"message":"backend unreachable: `+plan.target+`"}}`, 502)
 			return
@@ -1042,35 +1184,52 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 		defer resp.Body.Close()
 		w.Header().Set("X-Gotato-Backend", plan.target)
 		w.Header().Set("X-Gotato-SLM", plan.slmTag)
-		if strings.Contains(plan.fwdBody, "\"stream\":true") ||
-			strings.Contains(plan.fwdBody, "\"stream\": true") {
+		if req.Stream {
 			streamRelayChat(cfg, w, resp, &req, plan.target, plan.slmTag, t0, plan.servedLang)
 			return
 		}
-		out, _ := io.ReadAll(resp.Body)
-		var cr completionResp
-		_ = json.Unmarshal(out, &cr)
-		var respTimings struct {
-			Timings struct {
-				PredictedN int `json:"predicted_n"`
-				PromptN   int `json:"prompt_n"`
-			} `json:"timings"`
+		var out []byte
+
+		out, _ = io.ReadAll(resp.Body)
+
+		// the backend now answers through its OpenAI chat endpoint (thinking
+		// off), so parse the chat response shape for content + usage.
+		var chatResp struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+			Usage struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+			} `json:"usage"`
 		}
-		_ = json.Unmarshal(out, &respTimings)
-		tokens := respTimings.Timings.PredictedN
-		promptTokens := respTimings.Timings.PromptN
+		_ = json.Unmarshal(out, &chatResp)
+		var content string = ""
+		if len(chatResp.Choices) > 0 {
+			content = chatResp.Choices[0].Message.Content
+		}
+		var tokens int = chatResp.Usage.CompletionTokens
+		var promptTokens int = chatResp.Usage.PromptTokens
 		appendTurn(turn{Session: req.Session, Ts: time.Now().UnixMilli(),
 			SLM: "backend(" + plan.target + ")", Lang: plan.servedLang,
 			Tokens: tokens, WallMs: time.Since(t0).Milliseconds()})
-		appendContent(req.Session, "user", plan.origPrompt)
-		content := cr.Content
+		var enReply string = content
 		if bridgeZH && content != "" {
-			content = translateToEN(cfg, content)
+			enReply = translateToEN(cfg, content)
 		}
-		// tool loop (non-stream): the routed SLM asked for tools -> run the
+		fmt.Fprintf(os.Stderr, "[bridge] raw=%s en=%s\n",
+			contentHash(content)[:8], contentHash(enReply)[:8])
+		appendContent(req.Session, "user", plan.origPrompt)
+		// tool loop (non-stream): the routed SLM asked for tools (wrapped or
+		// bare - the slices drop the <tool_call> wrapper) -> run the
 		// instruct-brain loop and answer with the final result. The tool
 		// transcript rides in the reply so the user SEES what was executed.
-		if m := toolCallRe.FindStringSubmatch(cr.Content); m != nil {
+		var hasCall bool
+
+		_, hasCall = extractToolCall(content, toolSchemas())
+		if hasCall {
 			var final string
 			var transcript string
 			final, transcript = coworkTurn(toolBrain(cfg), session, lastUser, false)
@@ -1080,7 +1239,8 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 			tb.WriteString(final)
 			content = tb.String()
 		}
-		if stripped := stripThink(content); stripped != "" {
+		var stripped = stripThink(content)
+		if stripped != "" {
 			content = stripped // a fully-think reply stays visible: an empty
 			// message reads as empty-stop to omp and triggers its retry loop
 		}
@@ -1088,6 +1248,33 @@ func chatHandler(cfg *serveConfig) http.HandlerFunc {
 			appendContent(req.Session, "assistant", content)
 		}
 		writeChatCompletion(w, content, plan.slmTag, promptTokens, tokens)
+	}
+}
+
+// writeChatStreamed: send a one-shot assistant message as an SSE stream.
+// Streaming clients (omp, pi) fail hard on a non-stream JSON body for a
+// stream:true request ("Stream ended without finish_reason") - escalations
+// and overrides must arrive as proper chat chunks.
+func writeChatStreamed(w http.ResponseWriter, content string, model string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	var flusher, ok = w.(http.Flusher)
+	if ok {
+		flusher.Flush()
+	}
+	var id = "chatcmpl-gotato"
+	var created = time.Now().Unix()
+	if content != "" {
+		var chunk = fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{"content":%s},"finish_reason":null}]}`,
+			jsonString(id), created, jsonString(model), jsonString(content))
+		fmt.Fprintf(w, "data: %s\n\n", chunk)
+	}
+	var final = fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
+		jsonString(id), created, jsonString(model))
+	fmt.Fprintf(w, "data: %s\n\n", final)
+	fmt.Fprint(w, "data: [DONE]\n\n")
+	if ok {
+		flusher.Flush()
 	}
 }
 
@@ -1123,52 +1310,61 @@ func streamRelayChat(cfg *serveConfig, w http.ResponseWriter, resp *http.Respons
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Gotato-Backend", target)
 	w.Header().Set("X-Gotato-SLM", slmTag)
-	flusher, ok := w.(http.Flusher)
+	var flusher, ok = w.(http.Flusher)
 	if ok {
 		flusher.Flush()
 	}
-	id := "chatcmpl-gotato"
-	created := time.Now().Unix()
+	var id = "chatcmpl-gotato"
+	var created = time.Now().Unix()
 	var content strings.Builder
 	var reasoningText strings.Builder
 	var emittedContent bool = false
 	var tokens int = 0
 	var promptTokens int = 0
-	inThink := false // <think> spans chunks; content inside routes to reasoning
+	var stopPending bool = false
+	var inThink = false // <think> spans chunks; content inside routes to reasoning
 	var toolTail strings.Builder
 	var toolCalls []string
 	var toolSeen bool = false
+	// emitStopFrame: the terminal chunk (finish_reason "stop" + usage).
+	// Deferred until after the tool loop for tool-call replies; emitted
+	// immediately (and flushed) for plain replies.
+	var emitStopFrame = func() {
+		var final = fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
+			jsonString(id), created, jsonString(slmTag), promptTokens, tokens, promptTokens+tokens)
+		fmt.Fprintf(w, "data: %s\n\n", final)
+	}
 	// emitContentDelta / emitReasoningDelta: OpenAI chunk writers.
-	emitContentDelta := func(text string) {
+	var emitContentDelta = func(text string) {
 		if text == "" {
 			return
 		}
 		emittedContent = true
-		chunk := fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{"content":%s},"finish_reason":null}]}`,
+		var chunk = fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{"content":%s},"finish_reason":null}]}`,
 			jsonString(id), created, jsonString(slmTag), jsonString(text))
 		fmt.Fprintf(w, "data: %s\n\n", chunk)
 		if ok {
 			flusher.Flush()
 		}
 	}
-	emitReasoningDelta := func(text string) {
+	var emitReasoningDelta = func(text string) {
 		if text == "" {
 			return
 		}
 		reasoningText.WriteString(text)
-		chunk := fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{"reasoning_content":%s},"finish_reason":null}]}`,
+		var chunk = fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{"reasoning_content":%s},"finish_reason":null}]}`,
 			jsonString(id), created, jsonString(slmTag), jsonString(text))
 		fmt.Fprintf(w, "data: %s\n\n", chunk)
 		if ok {
 			flusher.Flush()
 		}
 	}
-	sc := bufio.NewScanner(resp.Body)
-	sbuf := getScanBuf()
+	var sc = bufio.NewScanner(resp.Body)
+	var sbuf = getScanBuf()
 	defer putScanBuf(sbuf)
 	sc.Buffer(sbuf, 1<<20)
 	for sc.Scan() {
-		line := sc.Text()
+		var line = sc.Text()
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
@@ -1177,11 +1373,40 @@ func streamRelayChat(cfg *serveConfig, w http.ResponseWriter, resp *http.Respons
 			Stop    bool   `json:"stop"`
 			Timings struct {
 				PredictedN int `json:"predicted_n"`
-				PromptN   int `json:"prompt_n"`
+				PromptN    int `json:"prompt_n"`
 			} `json:"timings"`
 		}
 		if json.Unmarshal([]byte(strings.TrimSpace(line[5:])), &frame) != nil {
 			continue
+		}
+		// the chat path forwards through the backend's OpenAI endpoint, so
+		// the SSE frames are chat chunks: choices[0].delta.content +
+		// finish_reason (usage rides in the final frame). /completion
+		// frames ({content, stop, timings}) are accepted too - both shapes
+		// land in the same fields below.
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+				FinishReason string `json:"finish_reason"`
+			} `json:"choices"`
+			Usage struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+			} `json:"usage"`
+		}
+		if len(frame.Content) == 0 && !frame.Stop {
+			if json.Unmarshal([]byte(strings.TrimSpace(line[5:])), &chunk) == nil && len(chunk.Choices) > 0 {
+				frame.Content = chunk.Choices[0].Delta.Content
+				if chunk.Choices[0].FinishReason != "" && !frame.Stop {
+					frame.Stop = chunk.Choices[0].FinishReason == "stop"
+					if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
+						frame.Timings.PromptN = chunk.Usage.PromptTokens
+						frame.Timings.PredictedN = chunk.Usage.CompletionTokens
+					}
+				}
+			}
 		}
 		if frame.Content != "" {
 			// route <think>…</think> to delta.reasoning_content instead of
@@ -1210,7 +1435,8 @@ func streamRelayChat(cfg *serveConfig, w http.ResponseWriter, resp *http.Respons
 			}
 			if inThink {
 				// remainder of a chunk inside an open think block
-				if j := strings.Index(text, "</think>"); j >= 0 {
+				var j = strings.Index(text, "</think>")
+				if j >= 0 {
 					emitReasoningDelta(text[:j])
 					text = text[j+len("</think>"):]
 					inThink = false
@@ -1219,39 +1445,44 @@ func streamRelayChat(cfg *serveConfig, w http.ResponseWriter, resp *http.Respons
 					continue
 				}
 			}
-						// suppress <tool_call> spans (stateful across chunks): the call
+			// suppress <tool_call> spans (stateful across chunks): the call
 			// JSON never reaches the client; at stream end the gateway runs
 			// the tool loop with the instruct brain and streams the result.
 			// Tolerates BOTH the contract form (<tool_call>…</tool_call>) and
 			// the bare JSON the tiny models actually emit.
 			toolTail.WriteString(text)
 			for {
-				tail := toolTail.String()
-				wi := strings.Index(tail, "<tool_call>")
-				bi := -1
-				for _, tn := range toolNames {
-					if k := strings.Index(tail, `{"name":"`+tn+`","arguments":{`); k >= 0 && (bi < 0 || k < bi) {
+				var tail = toolTail.String()
+				var wi = strings.Index(tail, "<tool_call>")
+				var bi = -1
+				var tn string
+
+				for _, tn = range toolNames {
+					var k = strings.Index(tail, `{"name":"`+tn+`","arguments":{`)
+					if k >= 0 && (bi < 0 || k < bi) {
 						bi = k
 					}
 				}
 				var hold int = -1
 				var wend int = -1
 				if wi >= 0 {
-					if j := strings.Index(tail[wi:], "</tool_call>"); j >= 0 {
+					var j = strings.Index(tail[wi:], "</tool_call>")
+					if j >= 0 {
 						wend = wi + j + len("</tool_call>")
 					} else {
 						hold = wi
 					}
 				}
 				if bi >= 0 && (wi < 0 || bi < wi) {
-					if j := braceClose(tail, bi); j >= 0 {
+					var j = braceClose(tail, bi)
+					if j >= 0 {
 						wend = j
 					} else {
 						hold = bi
 					}
 				}
 				if wend >= 0 {
-					start := wi
+					var start = wi
 					if wi < 0 || (bi >= 0 && bi < wi) {
 						start = bi
 					}
@@ -1290,14 +1521,27 @@ func streamRelayChat(cfg *serveConfig, w http.ResponseWriter, resp *http.Respons
 		if frame.Stop {
 			tokens = frame.Timings.PredictedN
 			promptTokens = frame.Timings.PromptN
-			final := fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
-				jsonString(id), created, jsonString(slmTag), promptTokens, tokens, promptTokens+tokens)
-			fmt.Fprintf(w, "data: %s\n\n", final)
+			if !toolSeen && toolTail.Len() == 0 {
+				// plain reply (no tool calls): deliver the stop frame NOW and
+				// flush - the client must not wait for the tool loop.
+				emitStopFrame()
+				if ok {
+					flusher.Flush()
+				}
+			} else {
+				// tool-call reply: hold the stop until the tool loop has
+				// streamed its results (content after the stop frame would
+				// confuse the client).
+				stopPending = true
+			}
 		}
 	}
 	// tool loop: the routed SLM asked for tools -> execute with the
 	// instruct brain (the proven cowork model) and stream the final answer.
 	if toolSeen || (toolTail.Len() > 0 && strings.Contains(toolTail.String(), `{"name":"`)) {
+		// warm delta: the cowork loop takes tens of seconds on the potato;
+		// a live byte keeps pi's stream parser from timing out in silence.
+		emitContentDelta("\n[executing fleet tools...]")
 		var transcript string
 		var final string
 		final, transcript = coworkTurn(toolBrain(cfg), req.Session, req.RoutePrompt, false)
@@ -1319,6 +1563,12 @@ func streamRelayChat(cfg *serveConfig, w http.ResponseWriter, resp *http.Respons
 		emitContentDelta(final)
 		if transcript != "" {
 			appendContent(req.Session, "system", "TOOLS: "+transcript)
+		}
+	}
+	if stopPending {
+		emitStopFrame()
+		if ok {
+			flusher.Flush()
 		}
 	}
 	// empty-stop guard: if the ENTIRE reply was thinking (unclosed <think>
@@ -1357,7 +1607,9 @@ func stackManifest() map[string]*stackLangEntry {
 	}
 	var base string = filepath.Base(strings.TrimRight(wd, "/"))
 	var path string = fleetDir + "/stacks/" + base + ".json"
-	data, err := os.ReadFile(path)
+	var data []byte
+
+	data, err = os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
@@ -1380,8 +1632,10 @@ func modelsHandler(cfg *serveConfig) http.HandlerFunc {
 		// omp-potato sees ONLY this stack's SLMs (manifest-aware): the
 		// model list IS the per-stack manifest's languages.
 		var langs []string = stackManifestLangs()
-		data := make([]map[string]any, 0, len(langs)+1)
-		for _, lang := range langs {
+		var data = make([]map[string]any, 0, len(langs)+1)
+		var lang string
+
+		for _, lang = range langs {
 			data = append(data, map[string]any{
 				"id":       "slm-" + lang,
 				"object":   "model",
@@ -1411,7 +1665,9 @@ func manifestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var base string = filepath.Base(strings.TrimRight(wd, "/"))
 	var path string = fleetDir + "/stacks/" + base + ".json"
-	data, err := os.ReadFile(path)
+	var data []byte
+
+	data, err = os.ReadFile(path)
 	if err != nil {
 		http.Error(w, `{"error":"no manifest for `+base+` - run expertd stacks `+wd+`"}`, 404)
 		return
@@ -1426,14 +1682,14 @@ func manifestHandler(w http.ResponseWriter, r *http.Request) {
 func slmBaseName(target string, lang string) string {
 	var base string = "slm"
 	switch {
-	case strings.Contains(target, ":8081"):
-		base = "python-expert"
 	case strings.Contains(target, ":8082"):
 		base = "2b-general"
 	case strings.Contains(target, ":8083"):
 		base = "4b-general"
 	case strings.Contains(target, ":8086"):
 		base = "instruct"
+	case strings.Contains(target, ":8089"):
+		base = "python-expert"
 	default:
 		if lang != "" {
 			base = lang + "-slice"
@@ -1446,7 +1702,7 @@ func slmBaseName(target string, lang string) string {
 // "python-expert · utils" or "rust-slice · rust". Shown by the TUI next to
 // its Thinking indicator and sent as the X-Gotato-SLM header.
 func slmDisplayTag(target string, lang string, label string, owner string) string {
-	base := slmBaseName(target, lang)
+	var base = slmBaseName(target, lang)
 	var topic string = label
 	if topic == "" {
 		topic = lang
@@ -1469,14 +1725,14 @@ func streamRelay(w http.ResponseWriter, resp *http.Response, req *completionReq,
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Gotato-Backend", target)
 	w.Header().Set("X-Gotato-SLM", slmTag)
-	flusher, ok := w.(http.Flusher)
+	var flusher, ok = w.(http.Flusher)
 	if ok {
 		flusher.Flush()
 	}
 	var acc strings.Builder
-	buf := make([]byte, 8192)
+	var buf = make([]byte, 8192)
 	for {
-		n, err := resp.Body.Read(buf)
+		var n, err = resp.Body.Read(buf)
 		if n > 0 {
 			acc.Write(buf[:n])
 			_, _ = w.Write(buf[:n])
@@ -1491,21 +1747,21 @@ func streamRelay(w http.ResponseWriter, resp *http.Response, req *completionReq,
 	// parse the accumulated SSE for content + final timings
 	var content strings.Builder
 	var tokens int = 0
-	sc := bufio.NewScanner(strings.NewReader(acc.String()))
-	sbuf := getScanBuf()
+	var sc = bufio.NewScanner(strings.NewReader(acc.String()))
+	var sbuf = getScanBuf()
 	defer putScanBuf(sbuf)
 	sc.Buffer(sbuf, 1<<20)
 	for sc.Scan() {
-		line := sc.Text()
+		var line = sc.Text()
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
 		var frame struct {
-			Content  string `json:"content"`
-			Stop     bool   `json:"stop"`
-			Timings  struct {
+			Content string `json:"content"`
+			Stop    bool   `json:"stop"`
+			Timings struct {
 				PredictedN int `json:"predicted_n"`
-				PromptN   int `json:"prompt_n"`
+				PromptN    int `json:"prompt_n"`
 			} `json:"timings"`
 		}
 		if json.Unmarshal([]byte(strings.TrimSpace(line[5:])), &frame) != nil {

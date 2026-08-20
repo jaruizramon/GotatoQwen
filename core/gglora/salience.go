@@ -13,6 +13,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -37,25 +38,30 @@ func newSalCollector(domain string, nLayer int, nHead int, ffn int) *salCollecto
 // accumulateLayer: fold ONE layer's activation energies (called from inside
 // forward, where the per-layer scratch buffers are still live).
 func (c *salCollector) accumulateLayer(s *scratch, m *model, l int, t int) {
-	base := l * m.NHead
-	for hp := 0; hp < m.NHead; hp++ {
+	var base = l * m.NHead
+	var hp = 0
+	for hp = 0; hp < m.NHead; hp++ {
 		var e float64 = 0
-		for pos := 0; pos < t; pos++ {
+		var pos = 0
+		for pos = 0; pos < t; pos++ {
 			var acc float64 = 0
-			ob := pos*m.NHead*m.HeadDim + hp*m.HeadDim
-			for d := 0; d < m.HeadDim; d++ {
-				v := float64(s.AttnOut[ob+d])
+			var ob = pos*m.NHead*m.HeadDim + hp*m.HeadDim
+			var d = 0
+			for d = 0; d < m.HeadDim; d++ {
+				var v = float64(s.AttnOut[ob+d])
 				acc += v * v
 			}
 			e += acc
 		}
 		c.Heads[base+hp] += e
 	}
-	nb := l * m.Ffn
-	for j := 0; j < m.Ffn; j++ {
+	var nb = l * m.Ffn
+	var j = 0
+	for j = 0; j < m.Ffn; j++ {
 		var e float64 = 0
-		for pos := 0; pos < t; pos++ {
-			v := float64(s.Gate[pos*m.Ffn+j])
+		var pos = 0
+		for pos = 0; pos < t; pos++ {
+			var v = float64(s.Gate[pos*m.Ffn+j])
 			e += v * v
 		}
 		c.Neurons[nb+j] += e
@@ -66,7 +72,8 @@ var salienceDir string = "salience-data"
 var fleetRoot string = "."
 
 func init() {
-	if v := os.Getenv("GOTATO_FLEET"); v != "" {
+	var v = os.Getenv("GOTATO_FLEET")
+	if v != "" {
 		salienceDir = v + "/salience"
 		fleetRoot = v
 	}
@@ -77,8 +84,8 @@ func saliencePath(domain string) string {
 }
 
 func loadSalience(domain string, m *model) *salCollector {
-	c := newSalCollector(domain, m.NLayer, m.NHead, m.Ffn)
-	data, err := os.ReadFile(saliencePath(domain))
+	var c = newSalCollector(domain, m.NLayer, m.NHead, m.Ffn)
+	var data, err = os.ReadFile(saliencePath(domain))
 	if err != nil {
 		return c
 	}
@@ -89,36 +96,46 @@ func loadSalience(domain string, m *model) *salCollector {
 }
 
 func saveSalience(c *salCollector) {
-	dir := filepath.Dir(saliencePath(c.Domain))
+	var dir = filepath.Dir(saliencePath(c.Domain))
 	if os.MkdirAll(dir, 0755) != nil {
 		return
 	}
-	data, _ := json.Marshal(c)
+	var data []byte
+
+	data, _ = json.Marshal(c)
 	_ = os.WriteFile(saliencePath(c.Domain), data, 0644)
 }
 
 // foldGlobal: global moments = sum over all domain accumulators on disk.
 func foldGlobal(m *model) *salCollector {
-	g := newSalCollector("global", m.NLayer, m.NHead, m.Ffn)
-	dir := salienceDir
-	entries, err := os.ReadDir(dir)
+	var g = newSalCollector("global", m.NLayer, m.NHead, m.Ffn)
+	var dir = salienceDir
+	var entries, err = os.ReadDir(dir)
 	if err != nil {
 		return g
 	}
-	for _, e := range entries {
+	var e fs.DirEntry
+
+	for _, e = range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
 		}
-		domain := e.Name()[:len(e.Name())-5]
-		c := loadSalience(domain, m)
+		var domain = e.Name()[:len(e.Name())-5]
+		var c = loadSalience(domain, m)
 		if c.Tokens == 0 {
 			continue
 		}
-		for i := range g.Heads {
+		var i int
+
+		for i = range g.Heads {
 			g.Heads[i] += c.Heads[i]
 		}
-		for i := range g.Neurons {
-			g.Neurons[i] += c.Neurons[i]
+		{
+			var i int
+
+			for i = range g.Neurons {
+				g.Neurons[i] += c.Neurons[i]
+			}
 		}
 		g.Tokens += c.Tokens
 	}
@@ -130,7 +147,8 @@ func foldGlobal(m *model) *salCollector {
 func collectCmd(args []string) {
 	var base, corpus, domain string
 	var ctx, stride int = 256, 128
-	for i := 0; i < len(args); i++ {
+	var i = 0
+	for i = 0; i < len(args); i++ {
 		switch args[i] {
 		case "--base":
 			base = args[i+1]
@@ -156,42 +174,59 @@ func collectCmd(args []string) {
 		fmt.Println("usage: gglora collect --base <model.gguf> --corpus <text> --domain <name> [--ctx 256] [--stride 128]")
 		os.Exit(2)
 	}
-	m, err := loadModel(base)
+	var m, err = loadModel(base)
 	if err != nil {
 		fmt.Println("load:", err)
 		os.Exit(1)
 	}
-	g, err := loadGGUF(base)
+	var g *ggufFile
+
+	g, err = loadGGUF(base)
 	if err != nil {
 		fmt.Println("load gguf:", err)
 		os.Exit(1)
 	}
-	tok := newTokenizer(g)
+	var tok = newTokenizer(g)
 	g.unmap()
-	data, err := os.ReadFile(corpus)
+	var data []byte
+
+	data, err = os.ReadFile(corpus)
 	if err != nil {
 		fmt.Println("corpus:", err)
 		os.Exit(1)
 	}
-	ids := tok.Encode(string(data))
+	var ids = tok.Encode(string(data))
 	if len(ids) < 32 {
 		fmt.Println("corpus too small")
 		os.Exit(1)
 	}
 	var samples [][]int
-	for i := 0; i+ctx <= len(ids); i += stride {
-		s := make([]int, ctx)
-		copy(s, ids[i:i+ctx])
-		samples = append(samples, s)
+	{
+		var i = 0
+		for i = 0; i+ctx <= len(ids); i += stride {
+			var s = make([]int, ctx)
+			copy(s, ids[i:i+ctx])
+			samples = append(samples, s)
+		}
 	}
 	if len(samples) == 0 {
-		samples = append(samples, ids[:ctx])
+		// corpus shorter than ctx: train on the whole sequence as one sample
+		samples = append(samples, ids)
 	}
 	fmt.Printf("[collect] domain=%s %d samples (ctx %d, stride %d)\n", domain, len(samples), ctx, stride)
-	c := loadSalience(domain, m)
-	scr := newScratch(ctx, m, 1)
+	var c = loadSalience(domain, m)
+	var scr = newScratch(ctx, m, 1)
+	// the manual heap: forward-only, so the arena only needs the per-sample
+	// h tensors (7 projections x layers x R); reset per sample.
+	heapInit(7*m.NLayer*ctx*loraRank + ctx*m.Hidden)
 	var t0 = time.Now().UnixMilli()
-	for si, s := range samples {
+	var si int
+
+	var s []int
+
+	for si, s = range samples {
+		heapReset()
+		scr.T = len(s) // short corpora: the sample may be shorter than ctx
 		m.Col = c
 		m.forward(scr, s)
 		m.Col = nil

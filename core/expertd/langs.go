@@ -42,7 +42,7 @@ import (
 
 type langEntry struct {
 	Exts     []string `json:"exts"`
-	Signals  []string `json:"signals"`  // regex sources, compiled at load
+	Signals  []string `json:"signals"` // regex sources, compiled at load
 	Keywords []string `json:"keywords"`
 	Source   string   `json:"source"` // "builtin" | "oracle"
 	AddedAt  float64  `json:"added_at,omitempty"`
@@ -134,10 +134,15 @@ func seedCatalog() {
 func langCatalogInit() {
 	seedCatalog()
 	catalogPath = fleetDir + "/languages.json"
-	if data, err := os.ReadFile(catalogPath); err == nil {
+	var data, err = os.ReadFile(catalogPath)
+	if err == nil {
 		var cf langCatalogFile
 		if json.Unmarshal(data, &cf) == nil {
-			for name, e := range cf.Languages {
+			var name string
+
+			var e *langEntry
+
+			for name, e = range cf.Languages {
 				langCatalog[name] = e
 			}
 		}
@@ -150,13 +155,22 @@ func langCatalogInit() {
 func rebuildLangMaps() {
 	extToLang = make(map[string]string)
 	langSignals = make(map[string][]*regexp.Regexp)
-	for name, e := range langCatalog {
-		for _, ext := range e.Exts {
+	var name string
+
+	var e *langEntry
+
+	for name, e = range langCatalog {
+		var ext string
+
+		for _, ext = range e.Exts {
 			extToLang[ext] = name
 		}
 		var pats []*regexp.Regexp = make([]*regexp.Regexp, 0, len(e.Signals))
-		for _, s := range e.Signals {
-			if re, err := regexp.Compile(s); err == nil {
+		var s string
+
+		for _, s = range e.Signals {
+			var re, err = regexp.Compile(s)
+			if err == nil {
 				pats = append(pats, re)
 			}
 		}
@@ -168,7 +182,9 @@ func rebuildLangMaps() {
 
 func saveCatalog() {
 	var cf langCatalogFile = langCatalogFile{Languages: langCatalog}
-	data, _ := json.MarshalIndent(cf, "", " ")
+	var data []byte
+
+	data, _ = json.MarshalIndent(cf, "", " ")
 	var tmp string = catalogPath + ".tmp"
 	if os.WriteFile(tmp, data, 0644) == nil {
 		_ = os.Rename(tmp, catalogPath)
@@ -176,28 +192,38 @@ func saveCatalog() {
 }
 
 func langKnown(lang string) bool {
-	_, ok := langCatalog[lang]
+	var ok bool
+
+	_, ok = langCatalog[lang]
 	return ok
 }
 
 func langsCmd(args []string) {
 	langCatalogInit()
 	var names []string = make([]string, 0, len(langCatalog))
-	for name := range langCatalog {
+	var name string
+
+	for name = range langCatalog {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	fmt.Printf("%-14s %-10s %-12s %-8s %s\n", "language", "source", "exts", "expert", "signals")
-	for _, name := range names {
-		e := langCatalog[name]
-		var expert string = "-"
-		if idx := loadIndex(); idx != nil {
-			if en, ok := idx[name]; ok {
-				expert = en.Status
+	{
+		var name string
+
+		for _, name = range names {
+			var e = langCatalog[name]
+			var expert string = "-"
+			var idx = loadIndex()
+			if idx != nil {
+				var en, ok = idx[name]
+				if ok {
+					expert = en.Status
+				}
 			}
+			fmt.Printf("%-14s %-10s %-12s %-8s %v\n",
+				name, e.Source, strings.Join(e.Exts, ","), expert, len(e.Signals))
 		}
-		fmt.Printf("%-14s %-10s %-12s %-8s %v\n",
-			name, e.Source, strings.Join(e.Exts, ","), expert, len(e.Signals))
 	}
 }
 
@@ -247,14 +273,19 @@ func collectUnknownFiles(stack string, cap int) []string {
 			}
 			return nil
 		}
-		ext := strings.ToLower(filepath.Ext(p))
-		if _, ok := extToLang[ext]; ok {
+		var ext = strings.ToLower(filepath.Ext(p))
+		var ok bool
+
+		_, ok = extToLang[ext]
+		if ok {
 			return nil
 		}
 		if info.Size() < 80 || info.Size() > 300*1024 {
 			return nil
 		}
-		data, err := os.ReadFile(p)
+		var data []byte
+
+		data, err = os.ReadFile(p)
 		if err != nil {
 			return nil
 		}
@@ -278,8 +309,10 @@ var errStopWalk = fmt.Errorf("stop")
 
 func sampleFiles(files []string) string {
 	var sb strings.Builder
-	for _, p := range files {
-		data, err := os.ReadFile(p)
+	var p string
+
+	for _, p = range files {
+		var data, err = os.ReadFile(p)
 		if err != nil {
 			continue
 		}
@@ -312,10 +345,20 @@ func oracleClassifyMock(samples string) oracleResponse {
 		{"gdscript", []string{".gd"}, []string{`(?m)^\s*extends \w+`, `func _ready\(|func _process\(|@export|@onready`, `signal \w+`, `move_and_slide\(|queue_free\(`}, []string{"extends", "func", "signal", "export"}},
 		{"html-css", []string{".html", ".htm", ".css"}, []string{`(?i)<!doctype html|<html`, `(?i)</(div|span|body|head|section|header|footer)>`, `(?i)class=\s*["']|id=\s*["']|href=`}, []string{"html", "div", "class", "css"}},
 	}
-	for _, r := range rules {
+	var r struct {
+		name     string
+		exts     []string
+		signals  []string
+		keywords []string
+	}
+
+	for _, r = range rules {
 		var hit bool = false
-		for _, s := range r.signals {
-			if re, err := regexp.Compile(s); err == nil && re.MatchString(samples) {
+		var s string
+
+		for _, s = range r.signals {
+			var re, err = regexp.Compile(s)
+			if err == nil && re.MatchString(samples) {
 				hit = true
 				break
 			}
@@ -334,13 +377,15 @@ func oracleClassifyRemote(samples string) (oracleResponse, error) {
 	if url == "" {
 		return oracleResponse{}, fmt.Errorf("GOTATO_ORACLE_URL is not set (the 27B oracle endpoint); use --mock on the potato")
 	}
-	body, _ := json.Marshal(map[string]any{
-		"model":      "qwen3.8-27b",
-		"messages":   []map[string]string{{"role": "system", "content": oracleAnalyzePrompt}, {"role": "user", "content": samples}},
-		"max_tokens": 800,
+	var body []byte
+
+	body, _ = json.Marshal(map[string]any{
+		"model":       "qwen3.8-27b",
+		"messages":    []map[string]string{{"role": "system", "content": oracleAnalyzePrompt}, {"role": "user", "content": samples}},
+		"max_tokens":  800,
 		"temperature": 0,
 	})
-	resp, err := httpPostJSONSlow(strings.TrimSuffix(url, "/")+"/v1/chat/completions", body)
+	var resp, err = httpPostJSONSlow(strings.TrimSuffix(url, "/")+"/v1/chat/completions", body)
 	if err != nil {
 		return oracleResponse{}, err
 	}
@@ -381,24 +426,35 @@ func registerProposals(oc oracleResponse) []string {
 	var added []string
 	var nameRe *regexp.Regexp = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 	var extRe *regexp.Regexp = regexp.MustCompile(`^\.[a-zA-Z0-9_]+$`)
-	for _, p := range oc.Languages {
+	var p oracleProposal
+
+	for _, p = range oc.Languages {
 		p.Name = strings.ToLower(strings.TrimSpace(p.Name))
 		if !nameRe.MatchString(p.Name) || langKnown(p.Name) {
 			continue
 		}
 		var e langEntry
-		for _, ext := range p.Exts {
+		var ext string
+
+		for _, ext = range p.Exts {
 			ext = strings.ToLower(strings.TrimSpace(ext))
 			if extRe.MatchString(ext) {
 				e.Exts = append(e.Exts, ext)
 			}
 		}
-		for _, s := range p.Signals {
-			if _, err := regexp.Compile(s); err == nil {
+		var s string
+
+		for _, s = range p.Signals {
+			var err error
+
+			_, err = regexp.Compile(s)
+			if err == nil {
 				e.Signals = append(e.Signals, s)
 			}
 		}
-		for _, kw := range p.Keywords {
+		var kw string
+
+		for _, kw = range p.Keywords {
 			e.Keywords = append(e.Keywords, strings.ToLower(kw))
 		}
 		if len(e.Exts) == 0 || len(e.Signals) == 0 {
@@ -420,7 +476,9 @@ func registerProposals(oc oracleResponse) []string {
 func oracleCmd(args []string) {
 	var stack string = ""
 	var mock bool = false
-	for _, a := range args {
+	var a string
+
+	for _, a = range args {
 		if a == "--mock" {
 			mock = true
 		} else {
@@ -468,18 +526,21 @@ func oracleCmd(args []string) {
 // expert). The builder re-checks index.json before publishing, so racing
 // the watcher is harmless.
 func spawnSliceBuild(lang string) bool {
-	if e, ok := loadIndex()[lang]; ok && e.Status == "ready" {
+	var e, ok = loadIndex()[lang]
+	if ok && e.Status == "ready" {
 		return false
 	}
-	self, err := os.Executable()
+	var self, err = os.Executable()
 	if err != nil {
 		return false
 	}
-	stack, err := os.Getwd()
+	var stack string
+
+	stack, err = os.Getwd()
 	if err != nil {
 		return false
 	}
-	cmd := exec.Command("nice", "-n", "10", self, "build", lang, stack)
+	var cmd = exec.Command("nice", "-n", "10", self, "build", lang, stack)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	return cmd.Start() == nil
 }

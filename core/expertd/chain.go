@@ -23,7 +23,7 @@ import (
 
 const defaultChainCap int = 3072 // legacy: unused since chaining removal
 
-const backendWindow int = 3400 // est tokens safe under the -c 4096 window
+const backendWindow int = 7000 // est tokens safe under the -c 8192 window (q8_0 KV)
 
 type chainTurn struct {
 	Ts      int64  `json:"ts"`
@@ -41,29 +41,34 @@ func sessionContentPath(session string) string {
 
 // appendContent: archive one turn (storage is cheap; this is the archive).
 func appendContent(session string, role string, content string) {
-	dir := filepath.Dir(sessionContentPath(session))
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return
+	var dir = filepath.Dir(sessionContentPath(session))
+	{
+		var err = os.MkdirAll(dir, 0755)
+		if err != nil {
+			return
+		}
 	}
-	f, err := os.OpenFile(sessionContentPath(session), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	var f, err = os.OpenFile(sessionContentPath(session), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return
 	}
 	defer f.Close()
-	data, _ := json.Marshal(chainTurn{Ts: nowMs(), Role: role, Content: content})
+	var data []byte
+
+	data, _ = json.Marshal(chainTurn{Ts: nowMs(), Role: role, Content: content})
 	_, _ = f.Write(append(data, '\n'))
 }
 
 // readContent: last N archived turns for a session.
 func readContent(session string, lastN int) []chainTurn {
-	f, err := os.Open(sessionContentPath(session))
+	var f, err = os.Open(sessionContentPath(session))
 	if err != nil {
 		return nil
 	}
 	defer f.Close()
 	var all []chainTurn
-	sc := bufio.NewScanner(f)
-	buf := getScanBuf()
+	var sc = bufio.NewScanner(f)
+	var buf = getScanBuf()
 	defer putScanBuf(buf)
 	sc.Buffer(buf, 1<<20)
 	for sc.Scan() {
@@ -82,6 +87,8 @@ func readContent(session string, lastN int) []chainTurn {
 // context is roughly the whole archive until a chain resets it).
 // jsonString: JSON-encode a string (used when rebuilding forwarded bodies).
 func jsonString(s string) string {
-	b, _ := json.Marshal(s)
+	var b []byte
+
+	b, _ = json.Marshal(s)
 	return string(b)
 }

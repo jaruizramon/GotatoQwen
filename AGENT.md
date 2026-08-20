@@ -45,7 +45,7 @@ cmake -S "$HOME/llama.cpp" -B "$HOME/llama.cpp/build" ... # or: bash bench/setup
 (cd core/gglora && GOGC=off go build -o gglora .)   # cgo: gcc + AVX2/FMA
 ```
 
-**Verify**: `./expertd langs` prints the language catalog; `./gglora train 2>&1 | grep usage` prints usage. Discipline: `GOGC=off` is intentional (no GC); the expertd core uses zero `:=` declarations; stdlib only — **except** `core/gglora/gemm.c`, the AVX2 kernels (the whole point: Go 1.22 emits zero FMA instructions; the C kernels reach ~87 GF/s vs ~10 pure Go).
+**Verify**: `./expertd langs` prints the language catalog; `./gglora train 2>&1 | grep usage` prints usage. Discipline: `GOGC=off` is intentional (no GC); every binding is an explicit `var` (zero `:=` in both packages); stdlib only — **except** `core/gglora/gemm.c`, the AVX2 kernels (the whole point: Go 1.22 emits zero FMA instructions; the C kernels reach ~87 GF/s vs ~10 pure Go). The trainer's per-sample tensors live on an explicit manual heap (`core/gglora/heap.go`): one fixed arena, bump-allocated (`heapAllocF32`), explicitly freed (`heapReset` per sample) — the programmer owns the heap, the runtime never collects.
 
 ## 3. The fleet (models)
 

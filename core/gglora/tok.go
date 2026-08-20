@@ -12,14 +12,14 @@ import (
 )
 
 type tokenizer struct {
-	rank    map[string]int  // token string -> id
-	merges  map[string]int  // "a b" -> rank
-	byteEnc [256]rune       // gpt2 byte encoder
+	rank    map[string]int // token string -> id
+	merges  map[string]int // "a b" -> rank
+	byteEnc [256]rune      // gpt2 byte encoder
 	byteDec map[rune]byte
 }
 
 func newTokenizer(g *ggufFile) *tokenizer {
-	t := &tokenizer{rank: map[string]int{}, merges: map[string]int{}, byteDec: map[rune]byte{}}
+	var t = &tokenizer{rank: map[string]int{}, merges: map[string]int{}, byteDec: map[rune]byte{}}
 	// byte encoder (standard gpt2 table)
 	var bs []int
 	var i int = 0
@@ -36,8 +36,10 @@ func newTokenizer(g *ggufFile) *tokenizer {
 	var n int = 0
 	var b int = 0
 	for b = 0; b < 256; b++ {
-		found := false
-		for _, x := range bs {
+		var found = false
+		var x int
+
+		for _, x = range bs {
 			if x == b {
 				found = true
 			}
@@ -48,23 +50,30 @@ func newTokenizer(g *ggufFile) *tokenizer {
 			n++
 		}
 	}
-	// byteEnc[byte] = the cs entry at the position where the byte appears in
-	// bs (cs is indexed by POSITION, not by byte value).
-	for i := 0; i < len(bs); i++ {
-		t.byteEnc[byte(bs[i])] = rune(cs[i])
-		t.byteDec[rune(cs[i])] = byte(bs[i])
+	{
+		// byteEnc[byte] = the cs entry at the position where the byte appears in
+		// bs (cs is indexed by POSITION, not by byte value).
+		var i = 0
+		for i = 0; i < len(bs); i++ {
+			t.byteEnc[byte(bs[i])] = rune(cs[i])
+			t.byteDec[rune(cs[i])] = byte(bs[i])
+		}
 	}
 	// tokens
-	toks := g.kvArray("tokenizer.ggml.tokens")
-	for id := 0; id < len(toks); id++ {
-		if s, ok := toks[id].(string); ok {
+	var toks = g.kvArray("tokenizer.ggml.tokens")
+	var id = 0
+	for id = 0; id < len(toks); id++ {
+		var s, ok = toks[id].(string)
+		if ok {
 			t.rank[s] = id
 		}
 	}
 	// merges
-	merges := g.kvArray("tokenizer.ggml.merges")
-	for rank := 0; rank < len(merges); rank++ {
-		if s, ok := merges[rank].(string); ok {
+	var merges = g.kvArray("tokenizer.ggml.merges")
+	var rank = 0
+	for rank = 0; rank < len(merges); rank++ {
+		var s, ok = merges[rank].(string)
+		if ok {
 			t.merges[s] = rank
 		}
 	}
@@ -74,35 +83,43 @@ func newTokenizer(g *ggufFile) *tokenizer {
 // encodePiece: byte-encode one pre-token, then BPE it, then map to ids.
 func (t *tokenizer) encodePiece(piece string) []int {
 	var sb strings.Builder
-	for i := 0; i < len(piece); {
-		r, sz := utf8.DecodeRuneInString(piece[i:])
+	var i = 0
+	for i = 0; i < len(piece); {
+		var r, sz = utf8.DecodeRuneInString(piece[i:])
 		if r == utf8.RuneError && sz == 1 {
 			sb.WriteRune(t.byteEnc[piece[i]])
 			i++
 		} else {
-			for _, by := range []byte(piece[i : i+sz]) {
+			var by byte
+
+			for _, by = range []byte(piece[i : i+sz]) {
 				sb.WriteRune(t.byteEnc[by])
 			}
 			i += sz
 		}
 	}
-	enc := sb.String()
-	if id, ok := t.rank[enc]; ok {
+	var enc = sb.String()
+	var id, ok = t.rank[enc]
+	if ok {
 		return []int{id}
 	}
 	// BPE: start from single chars; merge ONE pair per iteration (globally
 	// lowest rank, leftmost on ties) exactly like tiktoken's reference - a
 	// merge-all-occurrences variant diverges on repeated pairs.
-	parts := make([]string, 0, len(enc))
-	for _, r := range enc {
+	var parts = make([]string, 0, len(enc))
+	var r rune
+
+	for _, r = range enc {
 		parts = append(parts, string(r))
 	}
 	for {
-		minIdx := -1
-		minRank := 1 << 30
-		for i := 0; i < len(parts)-1; i++ {
-			key := parts[i] + " " + parts[i+1]
-			if rk, ok := t.merges[key]; ok && rk < minRank {
+		var minIdx = -1
+		var minRank = 1 << 30
+		var i = 0
+		for i = 0; i < len(parts)-1; i++ {
+			var key = parts[i] + " " + parts[i+1]
+			var rk, ok = t.merges[key]
+			if ok && rk < minRank {
 				minRank = rk
 				minIdx = i
 			}
@@ -114,8 +131,11 @@ func (t *tokenizer) encodePiece(piece string) []int {
 		parts = append(parts[:minIdx+1], parts[minIdx+2:]...)
 	}
 	var ids []int
-	for _, p := range parts {
-		if id, ok := t.rank[p]; ok {
+	var p string
+
+	for _, p = range parts {
+		var id, ok = t.rank[p]
+		if ok {
 			ids = append(ids, id)
 		}
 	}
@@ -132,23 +152,23 @@ func isWS(r rune) bool     { return unicode.IsSpace(r) }
 // two differ on whitespace runs: N-1 spaces split off, the last space
 // attaches to the following word). Verified against /tokenize.
 func preTokenize(s string) []string {
-	runes := []rune(s)
-	n := len(runes)
+	var runes = []rune(s)
+	var n = len(runes)
 	var out []string
 	var pos int = 0
 	for pos < n {
-		start := pos
-		cpt := runes[pos]
+		var start = pos
+		var cpt = runes[pos]
 		// regex: (?i:'s|'t|'re|'ve|'m|'ll|'d)
 		if cpt == '\'' && pos+1 < n {
-			next := unicode.ToLower(runes[pos+1])
+			var next = unicode.ToLower(runes[pos+1])
 			if next == 's' || next == 't' || next == 'm' || next == 'd' {
 				out = append(out, string(runes[pos:pos+2]))
 				pos += 2
 				continue
 			}
 			if pos+2 < n {
-				nn := unicode.ToLower(runes[pos+2])
+				var nn = unicode.ToLower(runes[pos+2])
 				if (next == 'r' && nn == 'e') || (next == 'v' && nn == 'e') ||
 					(next == 'l' && nn == 'l') {
 					out = append(out, string(runes[pos:pos+3]))
@@ -230,7 +250,9 @@ func preTokenize(s string) []string {
 // Encode: full pipeline, text -> token ids. addBos honors the model flag.
 func (t *tokenizer) Encode(text string) []int {
 	var ids []int
-	for _, piece := range preTokenize(text) {
+	var piece string
+
+	for _, piece = range preTokenize(text) {
 		ids = append(ids, t.encodePiece(piece)...)
 	}
 	return ids
@@ -239,7 +261,9 @@ func (t *tokenizer) Encode(text string) []int {
 // sortedTokenKeys: for debugging /tests.
 func (t *tokenizer) sortedTokenKeys() []string {
 	var keys []string
-	for k := range t.rank {
+	var k string
+
+	for k = range t.rank {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)

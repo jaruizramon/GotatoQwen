@@ -32,7 +32,7 @@ type loraLayer struct {
 }
 
 func newLoraLayer(W []float32, in int, out int, r int, alpha float32) *loraLayer {
-	l := &loraLayer{In: in, Out: out, R: r, Alpha: alpha,
+	var l = &loraLayer{In: in, Out: out, R: r, Alpha: alpha,
 		W: W, A: make([]float32, in*r), B: make([]float32, r*out),
 		mA: make([]float32, in*r), vA: make([]float32, in*r),
 		mB: make([]float32, r*out), vB: make([]float32, r*out),
@@ -103,8 +103,11 @@ func (l *loraLayer) fwdW(y []float32, x []float32, m int) {
 
 // fwd: y[m*out+j] += sum_k x[m*in+k]*W[j*in+k] + (alpha/r) * sum_r' h[m*r+r']*B[j*r+r']
 // where h[m*r+r'] = sum_k x[m*in+k]*A[r'*in+k]. Returns h (needed by back).
+// The h tensor is bump-allocated from the manual heap (heap.go) - it is
+// stored on the layer (hQ/hK/...) for backward and freed by heapReset at
+// the next sample boundary.
 func (l *loraLayer) fwd(y []float32, x []float32, m int) []float32 {
-	var h []float32 = make([]float32, m*l.R)
+	var h []float32 = heapAllocF32(m * l.R)
 	l.fwdW(y, x, m)
 	parallel(m, func(lo int, hi int) {
 		var row int = lo
@@ -131,7 +134,7 @@ func (l *loraLayer) back(dx []float32, dy []float32, x []float32, h []float32, m
 	// pre-transposed weights (chunked internally over the reduction dim;
 	// dx was zeroed by the caller).
 	gemmBwdSimd(dx, dy, l.WT, m, l.In, l.Out)
-	var dyh []float32 = make([]float32, m*l.R)
+	var dyh []float32 = heapAllocF32(m * l.R)
 	var scale float32 = l.Alpha / float32(l.R)
 	parallel(m, func(lo int, hi int) {
 		var row int = lo
@@ -205,12 +208,12 @@ func (l *loraLayer) adamStep(step int) {
 	for i = 0; i < len(l.A); i++ {
 		l.mA[i] = beta1*l.mA[i] + (1-beta1)*l.dA[i]
 		l.vA[i] = beta2*l.vA[i] + (1-beta2)*l.dA[i]*l.dA[i]
-		l.A[i] -= lr * (l.mA[i]/bc1) / (float32(math.Sqrt(float64(l.vA[i]/bc2))) + eps)
+		l.A[i] -= lr * (l.mA[i] / bc1) / (float32(math.Sqrt(float64(l.vA[i]/bc2))) + eps)
 	}
 	for i = 0; i < len(l.B); i++ {
 		l.mB[i] = beta1*l.mB[i] + (1-beta1)*l.dB[i]
 		l.vB[i] = beta2*l.vB[i] + (1-beta2)*l.dB[i]*l.dB[i]
-		l.B[i] -= lr * (l.mB[i]/bc1) / (float32(math.Sqrt(float64(l.vB[i]/bc2))) + eps)
+		l.B[i] -= lr * (l.mB[i] / bc1) / (float32(math.Sqrt(float64(l.vB[i]/bc2))) + eps)
 	}
 }
 
@@ -321,15 +324,15 @@ type model struct {
 	// Window: sliding-window attention in the training loop (0 = full
 	// causal attention). The train command defaults to 0 so the parity
 	// harness stays bit-exact; expertd build passes 128 (O(t*w) attention).
-	Window int
+	Window                                       int
 	NLayer, NHead, NKvHead, HeadDim, Hidden, Ffn int
-	Eps                                        float32
-	Theta                                      float64
-	TokEmb                                     []float32 // [vocab*hidden]
-	ET                                         []float32 // [hidden*vocab] transposed for the AVX2 head backward
-	OutNorm                                    []float32 // [hidden]
-	Vocab                                      int
-	Layers                                     []*modelLayer
+	Eps                                          float32
+	Theta                                        float64
+	TokEmb                                       []float32 // [vocab*hidden]
+	ET                                           []float32 // [hidden*vocab] transposed for the AVX2 head backward
+	OutNorm                                      []float32 // [hidden]
+	Vocab                                        int
+	Layers                                       []*modelLayer
 }
 
 type modelLayer struct {
@@ -353,7 +356,7 @@ type modelLayer struct {
 // per sample (~100MB of garbage per sample, plus a fresh T*vocab logits
 // array every forward). With reuse, heap stays flat and GC stays quiet.
 type scratch struct {
-	T int
+	T        int
 	X        []float32 // [T*H] activations (residual accumulator)
 	Hn       []float32 // [T*H] normed input
 	Q, K, V  []float32 // post-proj
@@ -366,39 +369,39 @@ type scratch struct {
 	Logits   []float32 // [T*vocab] (preallocated; rows fully written per forward)
 	G        []float32 // [T*vocab] dense (softmax-onehot) grads for the head backward
 	// per-layer backward buffers (max-sized, reused across layers)
-	Out       []float32 // [T*H]  O-proj output
-	DAttnOut  []float32 // [T*2048]
-	DX1       []float32 // [T*H]
-	DDownIn   []float32 // [T*Ffn]
-	DGatePre  []float32 // [T*Ffn]
-	DUp       []float32 // [T*Ffn]
-	DHn       []float32 // [T*H]
-	X1        []float32 // [T*H] xIn+oOut
-	DQn       []float32 // [T*2048]
-	DKn       []float32 // [T*1024]
-	DV        []float32 // [T*1024]
-	DQ        []float32 // [T*2048]
-	DK        []float32 // [T*1024]
-	DHn2      []float32 // [T*H]
-	Ds        []float32 // [T*nHead*T] per-(pos,head) softmax grad rows
-	DVp       []float32 // [threads*T*nkv*headDim] per-thread DV partials
-	DKnP      []float32 // [threads*T*nkv*headDim] per-thread DKn partials
-	Threads   int
+	Out      []float32 // [T*H]  O-proj output
+	DAttnOut []float32 // [T*2048]
+	DX1      []float32 // [T*H]
+	DDownIn  []float32 // [T*Ffn]
+	DGatePre []float32 // [T*Ffn]
+	DUp      []float32 // [T*Ffn]
+	DHn      []float32 // [T*H]
+	X1       []float32 // [T*H] xIn+oOut
+	DQn      []float32 // [T*2048]
+	DKn      []float32 // [T*1024]
+	DV       []float32 // [T*1024]
+	DQ       []float32 // [T*2048]
+	DK       []float32 // [T*1024]
+	DHn2     []float32 // [T*H]
+	Ds       []float32 // [T*nHead*T] per-(pos,head) softmax grad rows
+	DVp      []float32 // [threads*T*nkv*headDim] per-thread DV partials
+	DKnP     []float32 // [threads*T*nkv*headDim] per-thread DKn partials
+	Threads  int
 }
 
 func newScratch(t int, m *model, threads int) *scratch {
 	return &scratch{T: t, Threads: threads,
 		X: make([]float32, t*m.Hidden), Hn: make([]float32, t*m.Hidden),
 		Q: make([]float32, t*m.NHead*m.HeadDim), K: make([]float32, t*m.NKvHead*m.HeadDim),
-		V: make([]float32, t*m.NKvHead*m.HeadDim),
+		V:  make([]float32, t*m.NKvHead*m.HeadDim),
 		Qn: make([]float32, t*m.NHead*m.HeadDim), Kn: make([]float32, t*m.NKvHead*m.HeadDim),
 		AttnOut: make([]float32, t*m.NHead*m.HeadDim),
 		Scores:  make([]float32, t*m.NHead*t),
 		Gate:    make([]float32, t*m.Ffn), Up: make([]float32, t*m.Ffn),
-		GatePre: make([]float32, t*m.Ffn),
-		DownIn:  make([]float32, t*m.Ffn),
-		Logits:  make([]float32, t*m.Vocab),
-		G:       make([]float32, t*m.Vocab),
+		GatePre:  make([]float32, t*m.Ffn),
+		DownIn:   make([]float32, t*m.Ffn),
+		Logits:   make([]float32, t*m.Vocab),
+		G:        make([]float32, t*m.Vocab),
 		Out:      make([]float32, t*m.Hidden),
 		DAttnOut: make([]float32, t*m.NHead*m.HeadDim),
 		DX1:      make([]float32, t*m.Hidden),
@@ -422,7 +425,9 @@ func newScratch(t int, m *model, threads int) *scratch {
 // zeroF32: memset-style zero (the hot buffers are reused; anything that
 // ACCUMULATES across a layer must be cleared before the layer's backward).
 func zeroF32(v []float32) {
-	for i := range v {
+	var i int
+
+	for i = range v {
 		v[i] = 0
 	}
 }
@@ -438,7 +443,7 @@ func (m *model) forward(s *scratch, tokens []int) float32 {
 	}
 	var l int = 0
 	for l = 0; l < m.NLayer; l++ {
-		layer := m.Layers[l]
+		var layer = m.Layers[l]
 		layer.xIn = append(layer.xIn[:0], s.X...)
 		// attention
 		rmsNorm(s.Hn, s.X, layer.AttnNorm, m.Hidden, m.Eps)
@@ -451,7 +456,7 @@ func (m *model) forward(s *scratch, tokens []int) float32 {
 				var pos int = lo
 				for pos = lo; pos < hi; pos++ {
 					var base int = pos*m.NHead*m.HeadDim + hp*m.HeadDim
-					var kbase int = pos*m.NKvHead*m.HeadDim + (hp % m.NKvHead) * m.HeadDim
+					var kbase int = pos*m.NKvHead*m.HeadDim + (hp%m.NKvHead)*m.HeadDim
 					rmsNorm(s.Qn[base:base+m.HeadDim], s.Q[base:base+m.HeadDim], layer.QNorm, m.HeadDim, m.Eps)
 					ropeApply(s.Qn[base:base+m.HeadDim], pos, m.HeadDim, m.Theta)
 					rmsNorm(s.Kn[kbase:kbase+m.HeadDim], s.K[kbase:kbase+m.HeadDim], layer.KNorm, m.HeadDim, m.Eps)
@@ -535,7 +540,7 @@ func (m *model) forward(s *scratch, tokens []int) float32 {
 				var base int = row * m.Ffn
 				var g int = 0
 				for g = 0; g < m.Ffn; g++ {
-					s.GatePre[base+g] = s.Gate[base+g] // keep pre-silu for backward
+					s.GatePre[base+g] = s.Gate[base+g]                                                  // keep pre-silu for backward
 					s.Gate[base+g] = s.Gate[base+g] / (1 + float32(math.Exp(float64(-s.Gate[base+g])))) // silu
 					s.DownIn[base+g] = s.Gate[base+g] * s.Up[base+g]
 				}
@@ -584,7 +589,7 @@ func (m *model) backward(s *scratch, tokens []int) {
 	// matrix goes through the AVX2 kernel instead of the old per-vocab
 	// axpy loop, which streamed the whole 622MB embedding table once PER
 	// TOKEN (160GB per sample - the #1 profile hotspot).
-	var dXHead []float32 = make([]float32, t*m.Hidden)
+	var dXHead []float32 = heapAllocF32(t * m.Hidden)
 	var i int = 0
 	parallel(t, func(lo int, hi int) {
 		var i int = lo
@@ -621,9 +626,9 @@ func (m *model) backward(s *scratch, tokens []int) {
 	// ---- layers in reverse
 	var l int = 0
 	for l = m.NLayer - 1; l >= 0; l-- {
-		layer := m.Layers[l]
+		var layer = m.Layers[l]
 		// ---- MLP backward: s.X holds d(x2)
-		copy(s.DX1, s.X) // residual: d(x1) += d(x2)
+		copy(s.DX1, s.X)   // residual: d(x1) += d(x2)
 		zeroF32(s.DDownIn) // Down.back accumulates into its dx
 		layer.Down.back(s.DDownIn, s.X, s.DownIn, layer.hDown, t)
 		parallel(t, func(lo int, hi int) {
@@ -653,7 +658,7 @@ func (m *model) backward(s *scratch, tokens []int) {
 		// ---- attention backward (parallel over query positions; DV/DKn are
 		// shared accumulators, so each goroutine keeps per-thread partials
 		// and a deterministic sequential reduction follows).
-		zeroF32(s.DAttnOut) // O.back accumulates into its dx
+		zeroF32(s.DAttnOut)                                   // O.back accumulates into its dx
 		layer.O.back(s.DAttnOut, s.X, s.AttnOut, layer.hO, t) // dy = d(x1), dx = d(attn outs)
 		zeroF32(s.DQn)
 		var pv int = t * m.NKvHead * m.HeadDim
@@ -734,7 +739,7 @@ func (m *model) backward(s *scratch, tokens []int) {
 				var pos int = lo
 				for pos = lo; pos < hi; pos++ {
 					var base int = pos*m.NHead*m.HeadDim + hp*m.HeadDim
-					var kbase int = pos*m.NKvHead*m.HeadDim + (hp % m.NKvHead) * m.HeadDim
+					var kbase int = pos*m.NKvHead*m.HeadDim + (hp%m.NKvHead)*m.HeadDim
 					ropeBack(s.DQn[base:base+m.HeadDim], pos, m.HeadDim, m.Theta)
 					rmsNormBack(s.DQ[base:base+m.HeadDim], s.DQn[base:base+m.HeadDim],
 						s.Q[base:base+m.HeadDim], layer.QNorm, m.HeadDim, m.Eps)
@@ -757,21 +762,21 @@ func (m *model) backward(s *scratch, tokens []int) {
 
 // loadModel: read the base GGUF into a trainable model (dequant to fp32).
 func loadModel(path string) (*model, error) {
-	g, err := loadGGUF(path)
+	var g, err = loadGGUF(path)
 	if err != nil {
 		return nil, err
 	}
-	m := &model{
+	var m = &model{
 		NLayer: g.kvInt("qwen3.block_count"), NHead: g.kvInt("qwen3.attention.head_count"),
 		NKvHead: g.kvInt("qwen3.attention.head_count_kv"), HeadDim: g.kvInt("qwen3.attention.key_length"),
 		Hidden: g.kvInt("qwen3.embedding_length"), Ffn: g.kvInt("qwen3.feed_forward_length"),
-		Eps: float32(g.kvFloat("qwen3.attention.layer_norm_rms_epsilon")),
+		Eps:   float32(g.kvFloat("qwen3.attention.layer_norm_rms_epsilon")),
 		Theta: g.kvFloat("qwen3.rope.freq_base"),
 	}
 	if m.Theta == 0 {
 		m.Theta = 1000000
 	}
-	tokEmb := g.findTensor("token_embd.weight")
+	var tokEmb = g.findTensor("token_embd.weight")
 	if tokEmb == nil {
 		return nil, errNoTensor("token_embd.weight")
 	}
@@ -788,7 +793,7 @@ func loadModel(path string) (*model, error) {
 			m.ET[ehidx*m.Vocab+ev] = m.TokEmb[ev*m.Hidden+ehidx]
 		}
 	}
-	outNorm := g.findTensor("output_norm.weight")
+	var outNorm = g.findTensor("output_norm.weight")
 	if outNorm == nil {
 		return nil, errNoTensor("output_norm.weight")
 	}
@@ -796,7 +801,7 @@ func loadModel(path string) (*model, error) {
 	m.Layers = make([]*modelLayer, 0, m.NLayer)
 	var l int = 0
 	for l = 0; l < m.NLayer; l++ {
-		layer := &modelLayer{}
+		var layer = &modelLayer{}
 		layer.AttnNorm = mustTensor(g, fmt.Sprintf("blk.%d.attn_norm.weight", l))
 		layer.FfnNorm = mustTensor(g, fmt.Sprintf("blk.%d.ffn_norm.weight", l))
 		layer.QNorm = mustTensor(g, fmt.Sprintf("blk.%d.attn_q_norm.weight", l))
@@ -820,11 +825,11 @@ type errNoTensor string
 func (e errNoTensor) Error() string { return "tensor not found: " + string(e) }
 
 func mustTensor(g *ggufFile, name string) []float32 {
-	info := g.findTensor(name)
+	var info = g.findTensor(name)
 	if info == nil {
 		panic(errNoTensor(name))
 	}
-	w := g.tensorF32(info)
+	var w = g.tensorF32(info)
 	if w == nil {
 		panic("unsupported/ragged tensor type for " + name + " (type " +
 			fmt.Sprint(info.Type) + " dims " + fmt.Sprint(info.Dims) + ")")

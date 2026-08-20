@@ -32,18 +32,21 @@ var httpClient = &http.Client{
 // httpPostJSON: POST JSON, return the response body. Used by the chain
 // summarizer and the translation bridge.
 func httpPostJSON(url string, body []byte) ([]byte, error) {
-	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
+	var req, err = http.NewRequest("POST", url, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(req)
+	var resp *http.Response
+
+	resp, err = httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
 }
+
 // httpClientSlow: for genuinely long operations (the tool loop, context
 // compaction) where a contended potato can exceed the 120s interactive cap.
 var httpClientSlow = &http.Client{
@@ -61,12 +64,14 @@ var httpClientSlow = &http.Client{
 
 // httpPostJSONSlow: POST with the long timeout (tool loop / compaction).
 func httpPostJSONSlow(url string, body []byte) ([]byte, error) {
-	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
+	var req, err = http.NewRequest("POST", url, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClientSlow.Do(req)
+	var resp *http.Response
+
+	resp, err = httpClientSlow.Do(req)
 	if err != nil {
 		return nil, err
 	}

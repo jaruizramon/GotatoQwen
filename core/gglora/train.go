@@ -5,11 +5,12 @@
 // python.gguf). No python anywhere in the loop.
 //
 // usage:
-//   gglora train --base <model.gguf> --corpus <text> --out <adapter.gguf> \
-//                [--ctx 256] [--stride 128] [--epochs 2] [--threads 4]
-//   gglora tokcheck --base <model.gguf> --text "..."          (print ids)
-//   gglora tokcheck --base <model.gguf> --verify --server :8082 --text "..."
-//                              (compare against llama-server /tokenize)
+//
+//	gglora train --base <model.gguf> --corpus <text> --out <adapter.gguf> \
+//	             [--ctx 256] [--stride 128] [--epochs 2] [--threads 4]
+//	gglora tokcheck --base <model.gguf> --text "..."          (print ids)
+//	gglora tokcheck --base <model.gguf> --verify --server :8082 --text "..."
+//	                           (compare against llama-server /tokenize)
 package main
 
 import (
@@ -67,7 +68,9 @@ func parallel(n int, fn func(lo int, hi int)) {
 // clipGrads: per-tensor max-norm clipping (max L2 norm 1.0). Standard
 // stability guard: one bad sample must not explode the AdamW state.
 func clipGrads(gs ...[]float32) {
-	for _, g := range gs {
+	var g []float32
+
+	for _, g = range gs {
 		var n2 float64 = 0
 		var i int = 0
 		for i = 0; i < len(g); i++ {
@@ -94,7 +97,7 @@ func writeAdapterGGUF(path string, name string, m *model, alpha float32) error {
 	var pairs []tpair
 	var l int = 0
 	for l = 0; l < m.NLayer; l++ {
-		layer := m.Layers[l]
+		var layer = m.Layers[l]
 		pairs = append(pairs,
 			tpair{fmt.Sprintf("blk.%d.ffn_down.weight", l), layer.Down.A, layer.Down.B, layer.Down.In, layer.Down.R, layer.Down.Out},
 			tpair{fmt.Sprintf("blk.%d.ffn_gate.weight", l), layer.Gate.A, layer.Gate.B, layer.Gate.In, layer.Gate.R, layer.Gate.Out},
@@ -152,8 +155,9 @@ func writeAdapterGGUF(path string, name string, m *model, alpha float32) error {
 		info = append(info, s...)
 	}
 	var offsets []uint64
-	for i := 0; i < len(pairs); i++ {
-		p := pairs[i]
+	var i = 0
+	for i = 0; i < len(pairs); i++ {
+		var p = pairs[i]
 		iwstr(p.base + ".lora_a")
 		iw32(2)
 		iw64(uint64(p.in))
@@ -174,11 +178,14 @@ func writeAdapterGGUF(path string, name string, m *model, alpha float32) error {
 	// tensor at offset 0 and accumulates per-tensor alignment).
 	var dataStart uint64 = (uint64(len(buf)) + uint64(len(info)) + 31) &^ 31
 	var off uint64 = 0
-	for i := 0; i < len(pairs); i++ {
-		offsets[i*2] = off
-		off += uint64(len(pairs[i].a)) * 4
-		offsets[i*2+1] = off
-		off += uint64(len(pairs[i].b)) * 4
+	{
+		var i = 0
+		for i = 0; i < len(pairs); i++ {
+			offsets[i*2] = off
+			off += uint64(len(pairs[i].a)) * 4
+			offsets[i*2+1] = off
+			off += uint64(len(pairs[i].b)) * 4
+		}
 	}
 	// patch offsets into info (each offset field is the last 8 bytes of its entry)
 	var scan uint64 = 0
@@ -198,11 +205,14 @@ func writeAdapterGGUF(path string, name string, m *model, alpha float32) error {
 	for uint64(len(buf)) < dataStart {
 		buf = append(buf, 0)
 	}
-	for i := 0; i < len(pairs); i++ {
-		var a []byte = f32Bytes(pairs[i].a)
-		var b []byte = f32Bytes(pairs[i].b)
-		buf = append(buf, a...)
-		buf = append(buf, b...)
+	{
+		var i = 0
+		for i = 0; i < len(pairs); i++ {
+			var a []byte = f32Bytes(pairs[i].a)
+			var b []byte = f32Bytes(pairs[i].b)
+			buf = append(buf, a...)
+			buf = append(buf, b...)
+		}
 	}
 	if _, err = f.Write(buf); err != nil {
 		return err
@@ -268,7 +278,7 @@ func trainCmd(args []string) {
 	if name == "" {
 		name = "gotato-slice"
 	}
-	t0 := time.Now()
+	var t0 = time.Now()
 	if profilePath != "" {
 		var pf *os.File
 		pf, _ = os.Create(profilePath)
@@ -278,7 +288,7 @@ func trainCmd(args []string) {
 		}
 	}
 	fmt.Printf("[train] loading %s ...\n", base)
-	m, err := loadModel(base)
+	var m, err = loadModel(base)
 	if err != nil {
 		fmt.Println("load:", err)
 		os.Exit(1)
@@ -286,19 +296,23 @@ func trainCmd(args []string) {
 	m.Window = window
 	fmt.Printf("[train] model: %d layers, hidden %d, heads %d/%d, ffn %d, vocab %d (%.0fs)\n",
 		m.NLayer, m.Hidden, m.NHead, m.NKvHead, m.Ffn, m.Vocab, time.Since(t0).Seconds())
-	g, err := loadGGUF(base)
+	var g *ggufFile
+
+	g, err = loadGGUF(base)
 	if err != nil {
 		fmt.Println("load gguf:", err)
 		os.Exit(1)
 	}
-	tok := newTokenizer(g)
+	var tok = newTokenizer(g)
 	g.unmap() // weights are dequantized into RAM; drop the file mapping
-	corpusData, err := os.ReadFile(corpus)
+	var corpusData []byte
+
+	corpusData, err = os.ReadFile(corpus)
 	if err != nil {
 		fmt.Println("corpus:", err)
 		os.Exit(1)
 	}
-	ids := tok.Encode(string(corpusData))
+	var ids = tok.Encode(string(corpusData))
 	fmt.Printf("[train] corpus: %d chars -> %d tokens\n", len(corpusData), len(ids))
 	if len(ids) < 64 {
 		fmt.Println("corpus too small")
@@ -320,17 +334,26 @@ func trainCmd(args []string) {
 	fmt.Printf("[train] %d samples (ctx %d, stride %d), %d threads\n",
 		len(samples), ctx, stride, trainThreads)
 	var s *scratch = newScratch(ctx, m, trainThreads)
+	// the manual heap (heap.go): one flat arena sized for the worst sample.
+	// Per sample the arena holds every h (7 projections x layers x R),
+	// every dyh backward row, and the dXHead buffer; heapReset frees it
+	// all at the next sample boundary. No make() ever runs on the hot path.
+	var perSample int = 14*m.NLayer*ctx*loraRank + ctx*m.Hidden
+	heapInit(perSample)
+	fmt.Printf("[train] manual heap: %.1f MB arena, reset per sample (no GC)\n", float64(heapBytes())/1e6)
 	var step int = 0
-	for ep := 1; ep <= epochs; ep++ {
+	var ep = 1
+	for ep = 1; ep <= epochs; ep++ {
 		var tot float32 = 0
 		var si int = 0
 		for si = 0; si < len(samples); si++ {
 			step++
+			heapReset() // explicit free: the previous sample's h/dyh/dXHead
 			var tokens []int = samples[si]
 			// zero grads
 			var l int = 0
 			for l = 0; l < m.NLayer; l++ {
-				layer := m.Layers[l]
+				var layer = m.Layers[l]
 				layer.Q.zeroGrads()
 				layer.K.zeroGrads()
 				layer.V.zeroGrads()
@@ -340,7 +363,7 @@ func trainCmd(args []string) {
 				layer.Down.zeroGrads()
 			}
 			s.T = len(tokens) // short corpora: the sample may be shorter than ctx
-			loss := m.forward(s, tokens)
+			var loss = m.forward(s, tokens)
 			if math.IsNaN(float64(loss)) {
 				fmt.Println("[train] NaN loss - aborting")
 				os.Exit(1)
@@ -351,7 +374,7 @@ func trainCmd(args []string) {
 			// AdamW state - measured: stable ~11.96 then NaN on the last
 			// sample of epoch 1 without it.
 			for l = 0; l < m.NLayer; l++ {
-				layer := m.Layers[l]
+				var layer = m.Layers[l]
 				clipGrads(layer.Q.dA, layer.Q.dB)
 				clipGrads(layer.K.dA, layer.K.dB)
 				clipGrads(layer.V.dA, layer.V.dB)
@@ -365,7 +388,7 @@ func trainCmd(args []string) {
 			parallel(m.NLayer, func(lo int, hi int) {
 				var l int = lo
 				for l = lo; l < hi; l++ {
-					layer := m.Layers[l]
+					var layer = m.Layers[l]
 					layer.Q.adamStep(step)
 					layer.K.adamStep(step)
 					layer.V.adamStep(step)
@@ -384,12 +407,15 @@ func trainCmd(args []string) {
 		fmt.Printf("[train] epoch %d loss %.4f\n", ep, tot/float32(len(samples)))
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
-		fmt.Printf("[mem] heap_alloc %.0f MB heap_objects %d num_gc %d (flat = no leak)\n",
-			float64(ms.HeapAlloc)/1e6, ms.HeapObjects, ms.NumGC)
+		fmt.Printf("[mem] heap_alloc %.0f MB heap_objects %d num_gc %d arena %.1f MB (flat = no leak)\n",
+			float64(ms.HeapAlloc)/1e6, ms.HeapObjects, ms.NumGC, float64(heapBytes())/1e6)
 	}
-	if err := writeAdapterGGUF(out, name, m, 32); err != nil {
-		fmt.Println("write adapter:", err)
-		os.Exit(1)
+	{
+		var err = writeAdapterGGUF(out, name, m, 32)
+		if err != nil {
+			fmt.Println("write adapter:", err)
+			os.Exit(1)
+		}
 	}
 	fmt.Printf("[train] adapter -> %s (%.0fs total)\n", out, time.Since(t0).Seconds())
 }
@@ -419,23 +445,27 @@ func tokcheckCmd(args []string) {
 		fmt.Println("usage: gglora tokcheck --base <model.gguf> --text <s> [--verify --server :8082]")
 		os.Exit(2)
 	}
-	g, err := loadGGUF(base)
+	var g, err = loadGGUF(base)
 	if err != nil {
 		fmt.Println("load:", err)
 		os.Exit(1)
 	}
-	tok := newTokenizer(g)
-	ids := tok.Encode(text)
+	var tok = newTokenizer(g)
+	var ids = tok.Encode(text)
 	fmt.Println("ids:", ids)
 	if verify {
-		body, _ := json.Marshal(map[string]any{"content": text, "add_special": false})
-		resp, err := http.Post(server+"/tokenize", "application/json", strings.NewReader(string(body)))
+		var body []byte
+
+		body, _ = json.Marshal(map[string]any{"content": text, "add_special": false})
+		var resp, err = http.Post(server+"/tokenize", "application/json", strings.NewReader(string(body)))
 		if err != nil {
 			fmt.Println("server:", err)
 			os.Exit(1)
 		}
 		defer resp.Body.Close()
-		raw, _ := io.ReadAll(resp.Body)
+		var raw []byte
+
+		raw, _ = io.ReadAll(resp.Body)
 		var out struct {
 			Tokens []int `json:"tokens"`
 		}
@@ -443,7 +473,7 @@ func tokcheckCmd(args []string) {
 			fmt.Println("server response:", string(raw[:200]))
 			os.Exit(1)
 		}
-		ok := len(out.Tokens) == len(ids)
+		var ok = len(out.Tokens) == len(ids)
 		if ok {
 			for i = 0; i < len(ids); i++ {
 				if ids[i] != out.Tokens[i] {

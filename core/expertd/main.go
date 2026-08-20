@@ -12,11 +12,12 @@
 //   - index.json schema is byte-compatible with the Python prototype
 //
 // Usage:
-//   expertd scan <dir>                 print {lang: files, signature} as JSON
-//   expertd detect <file|text>         print detected language + confidence
-//   expertd watch <dir>                daemon: scan, index, spawn builder
-//   expertd route <file|text> [-n N]   detect -> index -> exec llama-cli
-//   expertd bench <dir>                repeated scan timing
+//
+//	expertd scan <dir>                 print {lang: files, signature} as JSON
+//	expertd detect <file|text>         print detected language + confidence
+//	expertd watch <dir>                daemon: scan, index, spawn builder
+//	expertd route <file|text> [-n N]   detect -> index -> exec llama-cli
+//	expertd bench <dir>                repeated scan timing
 package main
 
 import (
@@ -25,11 +26,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"hash"
 	"regexp"
 	"runtime/debug"
 	"sort"
@@ -46,25 +48,35 @@ var ggloraBin string = "" // resolved in applyEnv: repo core/gglora/gglora
 
 // applyEnv: the agent-setup contract. Every machine-specific path can be
 // overridden by environment variables, so a fresh checkout needs no edits:
-//   GOTATO_FLEET     fleet dir (models, adapters, index, sessions, sub-index)
-//   GOTATO_LLAMA_BIN llama.cpp build/bin dir (llama-cli, llama-server, ...)
-//   GOTATO_GGLORA    the Go LoRA trainer binary (default: <repo>/core/gglora/gglora)
+//
+//	GOTATO_FLEET     fleet dir (models, adapters, index, sessions, sub-index)
+//	GOTATO_LLAMA_BIN llama.cpp build/bin dir (llama-cli, llama-server, ...)
+//	GOTATO_GGLORA    the Go LoRA trainer binary (default: <repo>/core/gglora/gglora)
+//
 // No python anywhere: corpus collect, LoRA training and adapter writing are
 // all Go (expertd build + gglora train).
 func applyEnv() {
-	if v := os.Getenv("GOTATO_FLEET"); v != "" {
+	var v = os.Getenv("GOTATO_FLEET")
+	if v != "" {
 		fleetDir = v
 		indexPath = fleetDir + "/index.json"
 		sessionsPath = fleetDir + "/sessions.jsonl"
 	}
-	if v := os.Getenv("GOTATO_LLAMA_BIN"); v != "" {
-		llamaCli = v + "/llama-cli"
+	{
+		var v = os.Getenv("GOTATO_LLAMA_BIN")
+		if v != "" {
+			llamaCli = v + "/llama-cli"
+		}
 	}
-	if v := os.Getenv("GOTATO_GGLORA"); v != "" {
-		ggloraBin = v
+	{
+		var v = os.Getenv("GOTATO_GGLORA")
+		if v != "" {
+			ggloraBin = v
+		}
 	}
 	if ggloraBin == "" {
-		if self, err := os.Executable(); err == nil {
+		var self, err = os.Executable()
+		if err == nil {
 			ggloraBin = filepath.Join(filepath.Dir(self), "..", "gglora", "gglora")
 		}
 	}
@@ -99,13 +111,15 @@ var langSignals map[string][]*regexp.Regexp = map[string][]*regexp.Regexp{
 // language is trusted when >= 2 distinct patterns fire; single weak hits
 // like "type hints" in English text are rejected).
 func detectLanguageN(text string, path string) (string, float64, int) {
-	lang, conf := detectLanguage(text, path)
-	head := text
+	var lang, conf = detectLanguage(text, path)
+	var head = text
 	if len(head) > 4000 {
 		head = head[:4000]
 	}
-	hits := 0
-	for _, p := range langSignals[lang] {
+	var hits = 0
+	var p *regexp.Regexp
+
+	for _, p = range langSignals[lang] {
 		if p.MatchString(head) {
 			hits++
 		}
@@ -123,7 +137,9 @@ func looksLikeCode(text string) bool {
 	if len(head) > 6000 {
 		head = head[:6000]
 	}
-	for _, m := range markers {
+	var m string
+
+	for _, m = range markers {
 		if strings.Contains(head, m) {
 			return true
 		}
@@ -133,13 +149,13 @@ func looksLikeCode(text string) bool {
 
 // ---- index schema (byte-compatible with the Python prototype) ----------
 type expertEntry struct {
-	Status       string  `json:"status"`
-	Signature    string  `json:"signature"`
-	Files        int     `json:"files"`
-	PID          int     `json:"pid"`
-	ErrorAt      float64 `json:"error_at,omitempty"`
-	Error        string  `json:"error,omitempty"`
-	Lora         string  `json:"lora,omitempty"`
+	Status    string  `json:"status"`
+	Signature string  `json:"signature"`
+	Files     int     `json:"files"`
+	PID       int     `json:"pid"`
+	ErrorAt   float64 `json:"error_at,omitempty"`
+	Error     string  `json:"error,omitempty"`
+	Lora      string  `json:"lora,omitempty"`
 	// Mask: a sliced GGUF (ggslice output) - a full model file with the
 	// off-domain heads/neurons zeroed; served with -m, no adapter needed.
 	Mask         string  `json:"mask,omitempty"`
@@ -173,19 +189,23 @@ func scanDir(stack string) []scanResult {
 			}
 			return nil
 		}
-		ext := strings.ToLower(filepath.Ext(path))
-		lang, ok := extToLang[ext]
+		var ext = strings.ToLower(filepath.Ext(path))
+		var lang, ok = extToLang[ext]
 		if !ok {
 			return nil
 		}
-		info, err := d.Info()
+		var info fs.FileInfo
+
+		info, err = d.Info()
 		if err != nil {
 			return nil
 		}
 		if info.Size() < 80 || info.Size() > 400*1024 {
 			return nil
 		}
-		entry, ok := byLang[lang]
+		var entry *scanResult
+
+		entry, ok = byLang[lang]
 		if !ok {
 			entry = &scanResult{Lang: lang, Files: make([]string, 0, 8)}
 			byLang[lang] = entry
@@ -195,24 +215,32 @@ func scanDir(stack string) []scanResult {
 	})
 
 	var langs []string = make([]string, 0, len(byLang))
-	for lang := range byLang {
+	var lang string
+
+	for lang = range byLang {
 		langs = append(langs, lang)
 	}
 	sort.Strings(langs)
-	for _, lang := range langs {
-		entry := byLang[lang]
-		sort.Strings(entry.Files)
-		var h hash.Hash = sha256.New()
-		for _, p := range entry.Files {
-			h.Write([]byte(p))
-			var st syscall.Stat_t
-			if syscall.Stat(p, &st) == nil {
-				var secs float64 = float64(st.Mtim.Sec) + float64(st.Mtim.Nsec)/1e9
-				h.Write([]byte(strconv.FormatFloat(secs, 'f', -1, 64)))
+	{
+		var lang string
+
+		for _, lang = range langs {
+			var entry = byLang[lang]
+			sort.Strings(entry.Files)
+			var h hash.Hash = sha256.New()
+			var p string
+
+			for _, p = range entry.Files {
+				h.Write([]byte(p))
+				var st syscall.Stat_t
+				if syscall.Stat(p, &st) == nil {
+					var secs float64 = float64(st.Mtim.Sec) + float64(st.Mtim.Nsec)/1e9
+					h.Write([]byte(strconv.FormatFloat(secs, 'f', -1, 64)))
+				}
 			}
+			entry.Signature = hex.EncodeToString(h.Sum(nil))[:16]
+			out = append(out, *entry)
 		}
-		entry.Signature = hex.EncodeToString(h.Sum(nil))[:16]
-		out = append(out, *entry)
 	}
 	return out
 }
@@ -220,8 +248,9 @@ func scanDir(stack string) []scanResult {
 // ---- detect -------------------------------------------------------------
 func detectLanguage(text string, path string) (string, float64) {
 	if path != "" {
-		ext := strings.ToLower(filepath.Ext(path))
-		if lang, ok := extToLang[ext]; ok {
+		var ext = strings.ToLower(filepath.Ext(path))
+		var lang, ok = extToLang[ext]
+		if ok {
 			return lang, 0.9
 		}
 	}
@@ -230,9 +259,15 @@ func detectLanguage(text string, path string) (string, float64) {
 		head = head[:4000]
 	}
 	var scores map[string]int = make(map[string]int)
-	for lang, pats := range langSignals {
+	var lang string
+
+	var pats []*regexp.Regexp
+
+	for lang, pats = range langSignals {
 		var n int = 0
-		for _, p := range pats {
+		var p *regexp.Regexp
+
+		for _, p = range pats {
 			if p.MatchString(head) {
 				n++
 			}
@@ -242,11 +277,17 @@ func detectLanguage(text string, path string) (string, float64) {
 	var best string = "default"
 	var bestN int = 0
 	var total int = 0
-	for lang, n := range scores {
-		total += n
-		if n > bestN {
-			bestN = n
-			best = lang
+	{
+		var lang string
+
+		var n int
+
+		for lang, n = range scores {
+			total += n
+			if n > bestN {
+				bestN = n
+				best = lang
+			}
 		}
 	}
 	if total == 0 {
@@ -256,7 +297,7 @@ func detectLanguage(text string, path string) (string, float64) {
 }
 
 func resolveIndex(idxPath string, text string, topN int) []hit {
-	idx, err := loadSubIndex(idxPath)
+	var idx, err = loadSubIndex(idxPath)
 	if err != nil {
 		return nil
 	}
@@ -271,7 +312,7 @@ func usedPlaceholder() string {
 // ---- index --------------------------------------------------------------
 func loadIndex() indexFile {
 	var idx indexFile = make(indexFile)
-	data, err := os.ReadFile(indexPath)
+	var data, err = os.ReadFile(indexPath)
 	if err != nil {
 		return idx
 	}
@@ -280,7 +321,7 @@ func loadIndex() indexFile {
 }
 
 func saveIndex(idx indexFile) {
-	data, err := json.MarshalIndent(idx, "", " ")
+	var data, err = json.MarshalIndent(idx, "", " ")
 	if err != nil {
 		return
 	}
@@ -294,7 +335,7 @@ func isAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	err := syscall.Kill(pid, 0)
+	var err = syscall.Kill(pid, 0)
 	return err == nil || err == syscall.EPERM
 }
 
@@ -302,10 +343,12 @@ func isAlive(pid int) bool {
 func watch(stack string, interval time.Duration, once bool) {
 	fmt.Printf("[expertd] watching %s | index %s | GC off\n", stack, indexPath)
 	for {
-		idx := loadIndex()
-		scans := scanDir(stack)
-		for _, sc := range scans {
-			entry, ok := idx[sc.Lang]
+		var idx = loadIndex()
+		var scans = scanDir(stack)
+		var sc scanResult
+
+		for _, sc = range scans {
+			var entry, ok = idx[sc.Lang]
 			if !ok {
 				entry = expertEntry{}
 			}
@@ -325,25 +368,30 @@ func watch(stack string, interval time.Duration, once bool) {
 			idx[sc.Lang] = entry
 			saveIndex(idx)
 
-			logPath := fleetDir + "/build_" + sc.Lang + ".log"
-			logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+			var logPath = fleetDir + "/build_" + sc.Lang + ".log"
+			var logFile, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 			if err != nil {
 				continue
 			}
 			// the builder is this same binary: `expertd build` collects the
 			// corpus, trains with gglora (Go, no python) and publishes index.json
-			self, _ := os.Executable()
-			cmd := exec.Command("nice", "-n", "10", self, "build", sc.Lang, stack)
+			var self string
+
+			self, _ = os.Executable()
+			var cmd = exec.Command("nice", "-n", "10", self, "build", sc.Lang, stack)
 			cmd.Stdout = logFile
 			cmd.Stderr = logFile
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-			if err := cmd.Start(); err == nil {
-				entry.PID = cmd.Process.Pid
-				idx[sc.Lang] = entry
-				saveIndex(idx)
-				_ = logFile.Close()
-				fmt.Printf("[expertd] %s: %d files changed -> builder pid %d (2 threads, nice 10)\n",
-					sc.Lang, len(sc.Files), cmd.Process.Pid)
+			{
+				var err = cmd.Start()
+				if err == nil {
+					entry.PID = cmd.Process.Pid
+					idx[sc.Lang] = entry
+					saveIndex(idx)
+					_ = logFile.Close()
+					fmt.Printf("[expertd] %s: %d files changed -> builder pid %d (2 threads, nice 10)\n",
+						sc.Lang, len(sc.Files), cmd.Process.Pid)
+				}
 			}
 		}
 		if once {
@@ -357,16 +405,19 @@ func watch(stack string, interval time.Duration, once bool) {
 func route(target string, gen int, session string, scopeCheckOn bool) int {
 	var text string = ""
 	var path string = ""
-	if st, err := os.Stat(target); err == nil && !st.IsDir() {
-		path = target
-		data, err := os.ReadFile(target)
-		if err == nil {
-			text = string(data)
+	{
+		var st, err = os.Stat(target)
+		if err == nil && !st.IsDir() {
+			path = target
+			var data, err = os.ReadFile(target)
+			if err == nil {
+				text = string(data)
+			}
+		} else {
+			text = target
 		}
-	} else {
-		text = target
 	}
-	lang, conf := detectLanguage(text, path)
+	var lang, conf = detectLanguage(text, path)
 
 	// tier-2 outranks tier-1 ALWAYS (when the index exists): semantics beat
 	// lexical detection on strong margins. --scope-check additionally gates
@@ -374,8 +425,9 @@ func route(target string, gen int, session string, scopeCheckOn bool) int {
 	var idxPath string = fleetDir + "/subindex.json"
 	var semanticLang string = ""
 	var semanticMargin float64 = 0
-	if hits := resolveIndex(idxPath, text, 2); len(hits) > 0 {
-		top := hits[0]
+	var hits = resolveIndex(idxPath, text, 2)
+	if len(hits) > 0 {
+		var top = hits[0]
 		if len(hits) > 1 && hits[1].Score > 0 {
 			semanticMargin = top.Score / hits[1].Score
 		} else {
@@ -388,8 +440,11 @@ func route(target string, gen int, session string, scopeCheckOn bool) int {
 
 	// session ownership: the SLM that served the previous turn owns the session
 	var ownerLang string = ""
-	if prev, ok := lastSessionTurn(session); ok {
-		ownerLang = prev.Lang
+	{
+		var prev, ok = lastSessionTurn(session)
+		if ok {
+			ownerLang = prev.Lang
+		}
 	}
 	if scopeCheckOn && semanticLang != "" && ownerLang != "" && semanticLang != ownerLang {
 		// ask before switching - the out-of-scope protocol
@@ -411,8 +466,8 @@ func route(target string, gen int, session string, scopeCheckOn bool) int {
 		conf = semanticMargin
 	}
 
-	idx := loadIndex()
-	entry, ok := idx[lang]
+	var idx = loadIndex()
+	var entry, ok = idx[lang]
 	var model string = ""
 	var lora string = ""
 	var used string = "generalist"
@@ -425,23 +480,28 @@ func route(target string, gen int, session string, scopeCheckOn bool) int {
 		model = fleetDir + "/Qwen3.5-4B-Q4_K_M.gguf"
 		fmt.Printf("[router] lang=%s conf=%.2f -> generalist\n", lang, conf)
 	}
-	if _, err := os.Stat(model); err != nil {
-		fmt.Printf("[router] model missing: %s\n", model)
-		return 1
+	{
+		var err error
+
+		_, err = os.Stat(model)
+		if err != nil {
+			fmt.Printf("[router] model missing: %s\n", model)
+			return 1
+		}
 	}
 
-	args := []string{"-m", model, "-p", text, "-n", strconv.Itoa(gen), "-t", "4",
+	var args = []string{"-m", model, "-p", text, "-n", strconv.Itoa(gen), "-t", "4",
 		"-c", "4096", "--temp", "0.3", "--log-disable", "-st"}
 	if lora != "" {
 		args = append(args, "--lora", lora)
 	}
-	t0 := time.Now()
+	var t0 = time.Now()
 	var buf bytes.Buffer
-	cmd := exec.Command(llamaCli, args...)
+	var cmd = exec.Command(llamaCli, args...)
 	cmd.Stdout = &buf
 	cmd.Stderr = os.Stderr
-	err := cmd.Run()
-	dt := time.Since(t0)
+	var err = cmd.Run()
+	var dt = time.Since(t0)
 
 	// out-of-scope protocol: input-side (deterministic) then output-side (drift)
 	var scopeEv string = ""
@@ -450,7 +510,8 @@ func route(target string, gen int, session string, scopeCheckOn bool) int {
 		var idxPath string = fleetDir + "/subindex.json"
 		// the session's owner is the SLM that served the previous turn
 		var ownerLang string = lang
-		if prev, ok := lastSessionTurn(session); ok {
+		var prev, ok = lastSessionTurn(session)
+		if ok {
 			ownerLang = prev.Lang
 		}
 		scopeEv, escalation = scopeCheck(idxPath, text, ownerLang)
@@ -458,12 +519,12 @@ func route(target string, gen int, session string, scopeCheckOn bool) int {
 			scopeEv, escalation = scopeCheck(idxPath, stripTiming(buf.String()), lang)
 		}
 	}
-	t := turn{Session: session, Ts: time.Now().UnixMilli(), SLM: used,
+	var t = turn{Session: session, Ts: time.Now().UnixMilli(), SLM: used,
 		Lang: lang, Tokens: gen, WallMs: dt.Milliseconds(),
 		ScopeEvent: scopeEv, Escalation: escalation}
 	appendTurn(t)
 
-	out := buf.String()
+	var out = buf.String()
 	fmt.Print(out)
 	fmt.Printf("\n[router] [%s] %d tokens in %.1fs\n", used, gen, dt.Seconds())
 	if escalation != "" {
@@ -490,7 +551,18 @@ func bench(stack string, rounds int) {
 }
 
 func main() {
-	debug.SetGCPercent(-1) // the whole point: no garbage collector
+	// Deterministic no-GC core: fine for the short-lived scan/route CLI
+	// paths (3 MB RSS). The long-running servers (serve = the gateway,
+	// mcp = the tool server) allocate per request and would grow without
+	// bound - they NEED the GC, or the potato OOMs the gateway after a
+	// few hundred requests.
+	var cmd string = ""
+	if len(os.Args) > 1 {
+		cmd = os.Args[1]
+	}
+	if cmd != "serve" && cmd != "mcp" {
+		debug.SetGCPercent(-1)
+	}
 	applyEnv()
 	langCatalogInit()
 	if len(os.Args) < 2 {
@@ -507,7 +579,9 @@ func main() {
 	case "oracle":
 		oracleCmd(os.Args[2:])
 	case "scan":
-		for _, sc := range scanDir(os.Args[2]) {
+		var sc scanResult
+
+		for _, sc = range scanDir(os.Args[2]) {
 			fmt.Printf("%s: %d files, sig=%s\n", sc.Lang, len(sc.Files), sc.Signature)
 		}
 	case "detect":
@@ -518,12 +592,13 @@ func main() {
 		} else {
 			path = os.Args[2]
 		}
-		lang, conf := detectLanguage(text, path)
+		var lang, conf = detectLanguage(text, path)
 		fmt.Printf("lang=%s conf=%.2f\n", lang, conf)
 	case "watch":
 		var stack string = "/home/pipo/stack"
 		var once bool = false
-		for i := 2; i < len(os.Args); i++ {
+		var i = 2
+		for i = 2; i < len(os.Args); i++ {
 			if os.Args[i] == "--once" {
 				once = true
 			} else {
@@ -536,7 +611,8 @@ func main() {
 		var session string = "default"
 		var scopeCheckOn bool = false
 		var target string = ""
-		for i := 2; i < len(os.Args); i++ {
+		var i = 2
+		for i = 2; i < len(os.Args); i++ {
 			switch os.Args[i] {
 			case "-n":
 				if i+1 < len(os.Args) {

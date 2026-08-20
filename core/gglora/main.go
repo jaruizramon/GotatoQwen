@@ -1,8 +1,8 @@
 // main.go - gglora: the Go LoRA toolkit.
 //
-//   gglora <model.gguf> <tensor> <m> <out.json>   PoC: one verified LoRA step
-//   gglora train ...                               full-model LoRA trainer
-//   gglora tokcheck ...                            tokenizer verification
+//	gglora <model.gguf> <tensor> <m> <out.json>   PoC: one verified LoRA step
+//	gglora train ...                               full-model LoRA trainer
+//	gglora tokcheck ...                            tokenizer verification
 package main
 
 import (
@@ -41,7 +41,7 @@ func main() {
 	var m int = atoi(os.Args[3])
 	var outPath string = os.Args[4]
 
-	g, err := loadGGUF(path)
+	var g, err = loadGGUF(path)
 	if err != nil {
 		fmt.Println("gguf:", err)
 		os.Exit(1)
@@ -98,7 +98,9 @@ func main() {
 		"A": A0, "B": B0, "dA": dA, "dB": dB,
 		"A1": l.A, "B1": l.B,
 	}
-	jsonData, err := json.Marshal(payload)
+	var jsonData []byte
+
+	jsonData, err = json.Marshal(payload)
 	if err != nil {
 		fmt.Println("marshal:", err)
 		os.Exit(1)

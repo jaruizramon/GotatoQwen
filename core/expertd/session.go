@@ -2,16 +2,17 @@
 // and the out-of-scope escalation protocol.
 //
 // Escalation protocol:
-//   A session is owned by one SLM (per language/region). When the router
-//   detects a "pocket of knowledge" the active SLM does not own - via the
-//   tier-2 sub-index on the input (deterministic) or on the SLM's own output
-//   (drift detection) - it returns:
 //
-//     destination hit out of scope - shall we delegate an SLM for <LABEL> (<LANG>)?
+//	A session is owned by one SLM (per language/region). When the router
+//	detects a "pocket of knowledge" the active SLM does not own - via the
+//	tier-2 sub-index on the input (deterministic) or on the SLM's own output
+//	(drift detection) - it returns:
 //
-//   The ledger records every turn: session id, SLM, language, latency, and
-//   any scope event, so "which SLMs are currently being used for such
-//   session/prompt" is a query, not an OpenMP fork.
+//	  destination hit out of scope - shall we delegate an SLM for <LABEL> (<LANG>)?
+//
+//	The ledger records every turn: session id, SLM, language, latency, and
+//	any scope event, so "which SLMs are currently being used for such
+//	session/prompt" is a query, not an OpenMP fork.
 package main
 
 import (
@@ -49,11 +50,13 @@ var lastTurns map[string]turn = map[string]turn{}
 var useCounts map[string]int = map[string]int{}
 
 func appendTurn(t turn) {
-	data, err := json.Marshal(t)
+	var data, err = json.Marshal(t)
 	if err != nil {
 		return
 	}
-	f, err := os.OpenFile(sessionsPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	var f *os.File
+
+	f, err = os.OpenFile(sessionsPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return
 	}
@@ -62,7 +65,9 @@ func appendTurn(t turn) {
 	// hot state
 	stateMu.Lock()
 	lastTurns[t.Session] = t
-	for _, prefix := range []string{"backend(", "autostart("} {
+	var prefix string
+
+	for _, prefix = range []string{"backend(", "autostart("} {
 		if strings.HasPrefix(t.SLM, prefix) && strings.HasSuffix(t.SLM, ")") {
 			useCounts[strings.TrimSuffix(strings.TrimPrefix(t.SLM, prefix), ")")]++
 		}
@@ -74,14 +79,14 @@ func appendTurn(t turn) {
 // counters/last-turns survive restarts. After this, appendTurn keeps them
 // hot and the file is never re-read per request.
 func warmState() {
-	f, err := os.Open(sessionsPath)
+	var f, err = os.Open(sessionsPath)
 	if err != nil {
 		return
 	}
 	defer f.Close()
-	buf := getScanBuf()
+	var buf = getScanBuf()
 	defer putScanBuf(buf)
-	sc := bufio.NewScanner(f)
+	var sc = bufio.NewScanner(f)
 	sc.Buffer(buf, 1<<20)
 	stateMu.Lock()
 	for sc.Scan() {
@@ -92,7 +97,9 @@ func warmState() {
 		if t.Session != "" {
 			lastTurns[t.Session] = t
 		}
-		for _, prefix := range []string{"backend(", "autostart("} {
+		var prefix string
+
+		for _, prefix = range []string{"backend(", "autostart("} {
 			if strings.HasPrefix(t.SLM, prefix) && strings.HasSuffix(t.SLM, ")") {
 				useCounts[strings.TrimSuffix(strings.TrimPrefix(t.SLM, prefix), ")")]++
 			}
@@ -105,8 +112,12 @@ func warmState() {
 func ledgerUsesByTarget() map[string]int {
 	stateMu.Lock()
 	defer stateMu.Unlock()
-	out := make(map[string]int, len(useCounts))
-	for k, v := range useCounts {
+	var out = make(map[string]int, len(useCounts))
+	var k string
+
+	var v int
+
+	for k, v = range useCounts {
 		out[k] = v
 	}
 	return out
@@ -121,26 +132,27 @@ func sessionsCmd(args []string) {
 			n = 20
 		}
 	}
-	f, err := os.Open(sessionsPath)
+	var f, err = os.Open(sessionsPath)
 	if err != nil {
 		fmt.Println("no sessions yet:", err)
 		return
 	}
 	defer f.Close()
 	var lines []string
-	sc := bufio.NewScanner(f)
-	buf := getScanBuf()
+	var sc = bufio.NewScanner(f)
+	var buf = getScanBuf()
 	defer putScanBuf(buf)
 	sc.Buffer(buf, 1<<20)
 	for sc.Scan() {
 		lines = append(lines, sc.Text())
 	}
-	start := len(lines) - n
+	var start = len(lines) - n
 	if start < 0 {
 		start = 0
 	}
 	var active map[string]turn = make(map[string]turn)
-	for i := start; i < len(lines); i++ {
+	var i = start
+	for i = start; i < len(lines); i++ {
 		var t turn
 		if json.Unmarshal([]byte(lines[i]), &t) == nil {
 			active[t.Session] = t
@@ -148,20 +160,26 @@ func sessionsCmd(args []string) {
 	}
 	fmt.Printf("%-12s %-22s %-8s %-8s %-9s %s\n", "SESSION", "LAST TURN (UTC)", "SLM", "LANG", "WALL", "SCOPE")
 	var order []string
-	for s := range active {
+	var s string
+
+	for s = range active {
 		order = append(order, s)
 	}
 	sortStrings(order)
-	for _, s := range order {
-		t := active[s]
-		when := time.UnixMilli(t.Ts).UTC().Format("15:04:05")
-		scope := t.ScopeEvent
-		if scope == "" {
-			scope = "-"
+	{
+		var s string
+
+		for _, s = range order {
+			var t = active[s]
+			var when = time.UnixMilli(t.Ts).UTC().Format("15:04:05")
+			var scope = t.ScopeEvent
+			if scope == "" {
+				scope = "-"
+			}
+			fmt.Printf("%-12s %-22s %-8s %-8s %-9s %s\n",
+				truncate(s, 12), when, truncate(t.SLM, 22), t.Lang,
+				fmt.Sprintf("%dms", t.WallMs), scope)
 		}
-		fmt.Printf("%-12s %-22s %-8s %-8s %-9s %s\n",
-			truncate(s, 12), when, truncate(t.SLM, 22), t.Lang,
-			fmt.Sprintf("%dms", t.WallMs), scope)
 	}
 }
 
@@ -173,8 +191,10 @@ func truncate(s string, n int) string {
 }
 
 func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+	var i = 1
+	for i = 1; i < len(s); i++ {
+		var j = i
+		for j = i; j > 0 && s[j] < s[j-1]; j-- {
 			s[j], s[j-1] = s[j-1], s[j]
 		}
 	}
@@ -186,21 +206,22 @@ func sortStrings(s []string) {
 // (the fallback result is cached in RAM).
 func lastSessionTurn(session string) (turn, bool) {
 	stateMu.Lock()
-	if t, ok := lastTurns[session]; ok {
+	var t, ok = lastTurns[session]
+	if ok {
 		stateMu.Unlock()
 		return t, true
 	}
 	stateMu.Unlock()
-	f, err := os.Open(sessionsPath)
+	var f, err = os.Open(sessionsPath)
 	if err != nil {
 		return turn{}, false
 	}
 	defer f.Close()
-	buf := getScanBuf()
+	var buf = getScanBuf()
 	defer putScanBuf(buf)
 	var last turn
 	var found bool = false
-	sc := bufio.NewScanner(f)
+	var sc = bufio.NewScanner(f)
 	sc.Buffer(buf, 1<<20)
 	for sc.Scan() {
 		var t turn
@@ -220,20 +241,20 @@ func lastSessionTurn(session string) (turn, bool) {
 // scopeCheck: resolve text through the sub-index; if the top hit's language
 // differs from the session's active language, build the escalation message.
 func scopeCheck(idxPath string, text string, activeLang string) (string, string) {
-	idx, err := loadSubIndex(idxPath)
+	var idx, err = loadSubIndex(idxPath)
 	if err != nil || len(idx.Sections) == 0 {
 		return "", ""
 	}
-	hits := idx.resolve(text, 2)
+	var hits = idx.resolve(text, 2)
 	if len(hits) == 0 {
 		return "", ""
 	}
-	top := hits[0]
+	var top = hits[0]
 	if top.Lang != activeLang && top.Score > 0 {
-		msg := fmt.Sprintf(
+		var msg = fmt.Sprintf(
 			"destination hit out of scope - shall we delegate an SLM for %s (%s)?",
 			top.Label, top.Lang)
-		ev := fmt.Sprintf("out-of-scope->%s(%s)", top.Label, top.Lang)
+		var ev = fmt.Sprintf("out-of-scope->%s(%s)", top.Label, top.Lang)
 		return ev, msg
 	}
 	return "", ""
@@ -242,7 +263,9 @@ func scopeCheck(idxPath string, text string, activeLang string) (string, string)
 // stripTiming: drop llama-cli's timing/chat lines from captured output.
 func stripTiming(out string) string {
 	var keep []string
-	for _, l := range strings.Split(out, "\n") {
+	var l string
+
+	for _, l = range strings.Split(out, "\n") {
 		if strings.Contains(l, "t/s") || strings.HasPrefix(l, "> ") ||
 			strings.HasPrefix(l, "[") && strings.Contains(l, "Exiting") {
 			continue

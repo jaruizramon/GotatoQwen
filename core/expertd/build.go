@@ -1,6 +1,6 @@
 // build.go - the Go expert builder (replaces expert-builder.py).
 //
-//   expertd build <lang> <stack>
+//	expertd build <lang> <stack>
 //
 // Spawned by `expertd watch` (nice 10, detached). Collects the stack's
 // <lang> corpus, trains the LoRA adapter with gglora (the Go trainer -
@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,21 +37,27 @@ func buildCmd(args []string) {
 	}
 	var lang string = args[0]
 	var stack string = args[1]
-	logPath := fleetDir + "/build_" + lang + ".log"
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	var logPath = fleetDir + "/build_" + lang + ".log"
+	var logFile, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		os.Exit(1)
 	}
 	defer logFile.Close()
-	logf := func(format string, a ...any) {
-		line := fmt.Sprintf(format, a...) + "\n"
+	var logf = func(format string, a ...any) {
+		var line = fmt.Sprintf(format, a...) + "\n"
 		_, _ = fmt.Fprint(logFile, line)
 		_, _ = fmt.Fprint(os.Stderr, line)
 	}
 
 	var t0 time.Time = time.Now()
 	logf("[builder:%s] collect from %s ...", lang, stack)
-	corpusPath, nfiles, nbytes, err := collectCorpus(lang, stack)
+	var corpusPath string
+
+	var nfiles int
+
+	var nbytes int
+
+	corpusPath, nfiles, nbytes, err = collectCorpus(lang, stack)
 	if err != nil {
 		publishBuild(lang, false, "", 0, "collect failed: "+err.Error())
 		logf("[builder:%s] COLLECT FAILED: %v", lang, err)
@@ -61,7 +68,7 @@ func buildCmd(args []string) {
 	var adapter string = fleetDir + "/adapters/" + lang + ".gguf"
 	var base string = fleetDir + "/Qwen3-0.6B-Q8_0.gguf"
 	logf("[builder:%s] training LoRA (gglora, 4 threads, window 128) ...", lang)
-	cmd := exec.Command(ggloraBin, "train", "--base", base,
+	var cmd = exec.Command(ggloraBin, "train", "--base", base,
 		"--corpus", corpusPath, "--out", adapter,
 		"--threads", "4", "--window", "128", "--name", lang)
 	cmd.Stdout = logFile
@@ -73,10 +80,13 @@ func buildCmd(args []string) {
 		logf("[builder:%s] TRAIN FAILED: %v", lang, runErr)
 		os.Exit(1)
 	}
-	if st, err := os.Stat(adapter); err != nil || st.Size() == 0 {
-		publishBuild(lang, false, "", 0, "train failed: no adapter written")
-		logf("[builder:%s] TRAIN FAILED: no adapter written", lang)
-		os.Exit(1)
+	{
+		var st, err = os.Stat(adapter)
+		if err != nil || st.Size() == 0 {
+			publishBuild(lang, false, "", 0, "train failed: no adapter written")
+			logf("[builder:%s] TRAIN FAILED: no adapter written", lang)
+			os.Exit(1)
+		}
 	}
 	logf("[builder:%s] READY -> adapters/%s.gguf in %.0fs", lang, lang, dt)
 	publishBuild(lang, true, "adapters/"+lang+".gguf", dt, "")
@@ -87,7 +97,8 @@ func buildCmd(args []string) {
 // collectCorpus: walk the stack for <lang> files and write corpus/<lang>.txt.
 func collectCorpus(lang string, stack string) (string, int, int, error) {
 	var corpusDir string = fleetDir + "/corpus"
-	if err := os.MkdirAll(corpusDir, 0755); err != nil {
+	var err = os.MkdirAll(corpusDir, 0755)
+	if err != nil {
 		return "", 0, 0, err
 	}
 	var out string = corpusDir + "/" + lang + ".txt"
@@ -107,7 +118,9 @@ func collectCorpus(lang string, stack string) (string, int, int, error) {
 		if extToLang[strings.ToLower(filepath.Ext(p))] != lang {
 			return nil
 		}
-		data, err := os.ReadFile(p)
+		var data []byte
+
+		data, err = os.ReadFile(p)
 		if err != nil {
 			return nil
 		}
@@ -133,21 +146,32 @@ func collectCorpus(lang string, stack string) (string, int, int, error) {
 	}
 	// 1MB total cap: keep the biggest files, in descending size order.
 	var total int = 0
-	for _, p := range files {
-		if st, err := os.Stat(p); err == nil {
+	var p string
+
+	for _, p = range files {
+		var st, err = os.Stat(p)
+		if err == nil {
 			total += int(st.Size())
 		}
 	}
 	if total > maxCorpusBytes {
 		sort.Slice(files, func(i int, j int) bool {
-			si, _ := os.Stat(files[i])
-			sj, _ := os.Stat(files[j])
+			var si fs.FileInfo
+
+			si, _ = os.Stat(files[i])
+			var sj fs.FileInfo
+
+			sj, _ = os.Stat(files[j])
 			return si.Size() > sj.Size()
 		})
 		var keep []string = make([]string, 0, len(files))
 		var acc int = 0
-		for _, p := range files {
-			st, _ := os.Stat(p)
+		var p string
+
+		for _, p = range files {
+			var st fs.FileInfo
+
+			st, _ = os.Stat(p)
 			if acc+int(st.Size()) > maxCorpusBytes {
 				continue
 			}
@@ -157,20 +181,27 @@ func collectCorpus(lang string, stack string) (string, int, int, error) {
 		files = keep
 	}
 	var buf bytes.Buffer
-	for _, p := range files {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
+	{
+		var p string
+
+		for _, p = range files {
+			var data, err = os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			buf.WriteString("# ==== " + filepath.Base(p) + " ====\n")
+			buf.Write(bytes.ToValidUTF8(data, []byte("\uFFFD")))
+			buf.WriteString("\n")
 		}
-		buf.WriteString("# ==== " + filepath.Base(p) + " ====\n")
-		buf.Write(bytes.ToValidUTF8(data, []byte("\uFFFD")))
-		buf.WriteString("\n")
 	}
 	if buf.Len() == 0 {
 		return "", 0, 0, errors.New("corpus empty after dedupe")
 	}
-	if err := os.WriteFile(out, buf.Bytes(), 0644); err != nil {
-		return "", 0, 0, err
+	{
+		var err = os.WriteFile(out, buf.Bytes(), 0644)
+		if err != nil {
+			return "", 0, 0, err
+		}
 	}
 	return out, len(files), buf.Len(), nil
 }
@@ -190,7 +221,8 @@ func recordStackManifest(lang string, stack string, ok bool) {
 		return '_'
 	}, name)
 	var dir string = fleetDir + "/stacks"
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	var err = os.MkdirAll(dir, 0755)
+	if err != nil {
 		return
 	}
 	var path string = dir + "/" + name + ".json"
@@ -200,11 +232,15 @@ func recordStackManifest(lang string, stack string, ok bool) {
 	}
 	st.Stack = stack
 	st.Languages = make(map[string]*stackLangEntry)
-	if data, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(data, &st)
+	{
+		var data, err = os.ReadFile(path)
+		if err == nil {
+			_ = json.Unmarshal(data, &st)
+		}
 	}
 	var e stackLangEntry
-	if prev, has := st.Languages[lang]; has {
+	var prev, has = st.Languages[lang]
+	if has {
 		e = *prev
 	}
 	e.Status = "ready"
@@ -218,7 +254,9 @@ func recordStackManifest(lang string, stack string, ok bool) {
 	e.Window = 128
 	e.BuiltAt = float64(time.Now().Unix())
 	st.Languages[lang] = &e
-	data, _ := json.MarshalIndent(st, "", " ")
+	var data []byte
+
+	data, _ = json.MarshalIndent(st, "", " ")
 	var tmp string = path + ".tmp"
 	if os.WriteFile(tmp, data, 0644) == nil {
 		_ = os.Rename(tmp, path)
@@ -241,28 +279,35 @@ type stackLangEntry struct {
 // rebuilding).
 func stacksCmd(args []string) {
 	var stack string = ""
-	for _, a := range args {
+	var a string
+
+	for _, a = range args {
 		stack = a
 	}
 	if stack != "" {
-		for _, sc := range scanDir(stack) {
-			idx := loadIndex()
-			if e, ok := idx[sc.Lang]; ok && e.Status == "ready" {
+		var sc scanResult
+
+		for _, sc = range scanDir(stack) {
+			var idx = loadIndex()
+			var e, ok = idx[sc.Lang]
+			if ok && e.Status == "ready" {
 				recordStackManifest(sc.Lang, stack, true)
 			}
 		}
 	}
 	var dir string = fleetDir + "/stacks"
-	entries, err := os.ReadDir(dir)
+	var entries, err = os.ReadDir(dir)
 	if err != nil {
 		fmt.Println("[stacks] no per-stack manifests yet (run the watcher on a stack)")
 		return
 	}
-	for _, de := range entries {
+	var de fs.DirEntry
+
+	for _, de = range entries {
 		if de.IsDir() || filepath.Ext(de.Name()) != ".json" {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, de.Name()))
+		var data, err = os.ReadFile(filepath.Join(dir, de.Name()))
 		if err != nil {
 			continue
 		}
@@ -274,14 +319,18 @@ func stacksCmd(args []string) {
 			continue
 		}
 		fmt.Printf("%s:\n", st.Stack)
-		for lang, e := range st.Languages {
+		var lang string
+
+		var e *stackLangEntry
+
+		for lang, e = range st.Languages {
 			fmt.Printf("  %-12s %-7s base=%s lora=%s ctx=%d t=%d w=%d\n",
 				lang, e.Status, e.Base, e.Lora, e.Ctx, e.Threads, e.Window)
 		}
 	}
 }
 func publishBuild(lang string, ok bool, lora string, dt float64, errMsg string) {
-	idx := loadIndex()
+	var idx = loadIndex()
 	var e expertEntry
 	var has bool
 	e, has = idx[lang]
